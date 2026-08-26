@@ -49,8 +49,13 @@ export interface HallucinationDetectionResult {
  */
 // ── 增強後偵測 ──
 
-/** 增強後文字長度爆炸倍率門檻 — 校對只加標點空白，正常增幅 < 1.3 倍，2 倍已很寬鬆 */
+/** 增強後文字長度爆炸倍率門檻。 */
 export const ENHANCEMENT_LENGTH_EXPLOSION_RATIO = 2;
+/**
+ * 增強後文字至少要比原文多這麼多字，才會搭配倍率門檻判定為爆炸。
+ * 純比例判斷對短句太敏感，例如短句正常補標點或做自我修正後整理都可能超過 2 倍。
+ */
+export const ENHANCEMENT_LENGTH_EXPLOSION_MIN_ABS_DELTA = 20;
 
 export interface EnhancementAnomalyParams {
   rawText: string;
@@ -63,10 +68,10 @@ export interface EnhancementAnomalyResult {
 }
 
 /**
- * 增強後語意偏移偵測 — 檢查 LLM 增強是否產生異常結果。
+ * 增強後長度異常偵測。
  *
- * 目前只做一層「長度爆炸」偵測：校對工具只改錯字和加標點，
- * 產出不應比輸入長 3 倍以上。若超過，代表 LLM 在回答問題或產生幻覺。
+ * 只有「倍率」與「絕對增加量」兩個條件同時超標才攔截，避免短句因正常清理、
+ * 補標點或自我修正而被誤判；真正的 LLM 幻覺通常會一次增加一整段文字。
  */
 export function detectEnhancementAnomaly(
   params: EnhancementAnomalyParams,
@@ -79,7 +84,11 @@ export function detectEnhancementAnomaly(
     return { isAnomaly: false, reason: null };
   }
 
-  if (enhancedLength >= rawLength * ENHANCEMENT_LENGTH_EXPLOSION_RATIO) {
+  const absoluteDelta = enhancedLength - rawLength;
+  if (
+    enhancedLength >= rawLength * ENHANCEMENT_LENGTH_EXPLOSION_RATIO &&
+    absoluteDelta >= ENHANCEMENT_LENGTH_EXPLOSION_MIN_ABS_DELTA
+  ) {
     return { isAnomaly: true, reason: "length-explosion" };
   }
 
@@ -88,8 +97,11 @@ export function detectEnhancementAnomaly(
 
 // ── 增強後語意 grounding 偵測（#43）──
 
-/** 語意守衛：正規化後 rawText 至少要這麼長才判定（過短不可靠、交給 prompt） */
-export const SEMANTIC_DRIFT_MIN_RAW_CHARS = 6;
+/**
+ * 語意守衛：正規化後 rawText 至少要這麼長才判定。
+ * 短句做刪除口頭禪、自我修正時 bigram overlap 很不穩定，因此直接豁免。
+ */
+export const SEMANTIC_DRIFT_MIN_RAW_CHARS = 20;
 /** 語意守衛門檻：enhanced 的 bigram 落在 raw 內的比例低於此值 → 判定「內容飄走」。
  *  刻意設低（保守）：只擋「明顯不相干」，避免把合法的條列化/大幅改寫誤判成 drift。 */
 export const SEMANTIC_DRIFT_MIN_OVERLAP = 0.2;
