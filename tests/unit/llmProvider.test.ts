@@ -327,7 +327,7 @@ describe("llmProvider.ts", () => {
 
   describe("helpers", () => {
     it("[P0] getProviderTimeout 回傳正確值", () => {
-      expect(getProviderTimeout("groq")).toBe(5000);
+      expect(getProviderTimeout("groq")).toBe(15000);
       expect(getProviderTimeout("openai")).toBe(30000);
       expect(getProviderTimeout("anthropic")).toBe(30000);
       expect(getProviderTimeout("gemini")).toBe(30000);

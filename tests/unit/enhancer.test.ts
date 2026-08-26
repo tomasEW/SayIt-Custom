@@ -118,9 +118,9 @@ describe("enhancer.ts", () => {
       const body = JSON.parse(callArgs[1].body);
       expect(body.model).toBe("qwen/qwen3.6-27b");
       expect(body.temperature).toBe(0.1);
-      // Qwen3.x 預設開 <think> 思考模式，必須明確關閉（省時間、保 5 秒 timeout）
+      // Qwen3.x 預設開 <think> 思考模式，必須明確關閉（降低整理延遲）
       expect(body.reasoning_effort).toBe("none");
-      expect(body.max_tokens).toBe(8192);
+      expect(body.max_tokens).toBe(2048);
       expect(body.messages).toHaveLength(2);
       expect(body.messages[0].role).toBe("system");
       expect(body.messages[1].role).toBe("user");
@@ -439,20 +439,20 @@ describe("enhancer.ts", () => {
   });
 
   describe("Timeout 處理", () => {
-    it("[P0] 超過 5 秒應拋出逾時錯誤", async () => {
+    it("[P0] 超過 15 秒應拋出逾時錯誤", async () => {
       vi.useFakeTimers();
 
       mockFetch.mockImplementation(
         () =>
           new Promise((resolve) => {
-            setTimeout(() => resolve(createSuccessResponse("晚了")), 6000);
+            setTimeout(() => resolve(createSuccessResponse("晚了")), 16000);
           }),
       );
 
       const { enhanceText } = await import("../../src/lib/enhancer");
       const promise = enhanceText("測試文字測試文字測試", TEST_API_KEY);
 
-      vi.advanceTimersByTime(5000);
+      vi.advanceTimersByTime(15000);
 
       await expect(promise).rejects.toThrow("Enhancement timeout");
 
