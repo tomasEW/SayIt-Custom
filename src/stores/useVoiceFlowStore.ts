@@ -1243,7 +1243,7 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
       // #39：轉譯語言為繁中時，把 Whisper 的簡體輸出轉成繁體（落地前一次到位）
       result.rawText = applyTranscriptTextTransforms(result.rawText);
 
-      writeInfoLog(`轉錄原文: "${result.rawText}"`);
+      writeInfoLog(`Transcription completed: rawLength=${result.rawText.length}`);
 
       if (isEmptyTranscription(result.rawText)) {
         // 空轉錄 → 寫入 failed 記錄，保留錄音檔
@@ -1427,7 +1427,9 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
             status: "success",
           });
 
-          writeInfoLog(`AI 整理: "${enhanceResult.text}"`);
+          writeInfoLog(
+            `AI enhancement completed: rawLength=${result.rawText.length}, enhancedLength=${enhanceResult.text.length}, fallback=${shouldFallbackToRaw}`,
+          );
 
           await completePasteFlow({
             text: enhanceResult.text,
@@ -1449,7 +1451,7 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
             performance.now() - enhancementStartTime;
           const enhanceErrorDetail = getEnhancementErrorMessage(enhanceError);
           writeErrorLog(
-            `useVoiceFlowStore: AI enhancement failed: ${enhanceErrorDetail}`,
+            `useVoiceFlowStore: AI enhancement failed: ${enhanceErrorDetail}; diagnostic=${extractErrorMessage(enhanceError)}`,
           );
           captureError(enhanceError, {
             source: "voice-flow",
@@ -1585,7 +1587,7 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
         editSourceText: params.selectedText,
       });
 
-      writeInfoLog(`Edit mode result: "${editResult.text}"`);
+      writeInfoLog(`Edit mode completed: resultLength=${editResult.text.length}`);
 
       await completePasteFlow({
         text: editResult.text,
@@ -1666,7 +1668,7 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
       // #39：同主路徑，重送轉錄後也套用簡→繁
       result.rawText = applyTranscriptTextTransforms(result.rawText);
 
-      writeInfoLog(`重送轉錄原文: "${result.rawText}"`);
+      writeInfoLog(`Retry transcription completed: rawLength=${result.rawText.length}`);
 
       if (isEmptyTranscription(result.rawText)) {
         // 重送也失敗 → 不再提供重送
@@ -1756,7 +1758,9 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
             status: "success",
           });
 
-          writeInfoLog(`重送 AI 整理: "${enhanceResult.text}"`);
+          writeInfoLog(
+            `Retry AI enhancement completed: rawLength=${result.rawText.length}, enhancedLength=${enhanceResult.text.length}, fallback=${shouldFallbackToRaw}`,
+          );
 
           await completePasteFlow({
             text: enhanceResult.text,

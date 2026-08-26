@@ -8,7 +8,11 @@ extern crate objc;
 
 mod plugins;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use tauri::{
     command,
     menu::{Menu, MenuItem},
@@ -91,11 +95,24 @@ fn request_app_restart<R: Runtime>(app: AppHandle<R>) {
 }
 
 #[command]
-fn debug_log(level: String, message: String) {
+fn debug_log<R: Runtime>(app: AppHandle<R>, level: String, message: String) {
     match level.as_str() {
         "error" => eprintln!("[webview:ERROR] {message}"),
         "warn" => println!("[webview:WARN] {message}"),
         _ => println!("[webview] {message}"),
+    }
+
+    // Finder 啟動時 stdout 不可見；只把呼叫端主動送來的診斷訊息寫入檔案。
+    // 語音逐字稿與 AI 回覆不應透過這個管道記錄。
+    let Ok(log_dir) = app.path().app_log_dir() else {
+        return;
+    };
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let log_path = log_dir.join("sayit-custom.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "[{}] {}", level.to_uppercase(), message);
     }
 }
 

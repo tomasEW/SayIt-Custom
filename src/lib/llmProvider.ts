@@ -62,11 +62,11 @@ export function getProviderTimeout(providerId: LlmProviderId): number {
   return PROVIDER_TIMEOUT_MS[providerId];
 }
 
-// Anthropic Claude (Haiku 4.5 / 3.5 Haiku) standard 模式 max_tokens 上限 8192；
-// Groq 模型多數上限也接近 8192。OpenAI / Gemini 支援更高，且 Gemini 2.5 的
-// thinking tokens 計入 maxOutputTokens 配額，需要更高 buffer 避免長轉錄被截斷。
+// Groq 免費／on-demand tier 的 TPM 額度可能低於模型的理論輸出上限；若直接要求
+// 8192 output tokens，連極短的聽寫也會因 input + max_tokens 超過 8000 TPM 而立即 413。
+// 2048 對語音整理已足夠，並保留足夠額度給 system prompt、詞彙表和逐字稿本身。
 const PROVIDER_DEFAULT_MAX_TOKENS: Record<LlmProviderId, number> = {
-  groq: 8192,
+  groq: 2048,
   openai: 16384,
   anthropic: 8192,
   gemini: 16384,
