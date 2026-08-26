@@ -26,6 +26,15 @@ export class EnhancerApiError extends Error {
   }
 }
 
+export class EnhancerEmptyResponseError extends Error {
+  public code = "ENHANCEMENT_EMPTY_RESPONSE";
+
+  constructor(message = "Enhancement returned empty content") {
+    super(message);
+    this.name = "EnhancerEmptyResponseError";
+  }
+}
+
 export function getDefaultSystemPrompt(): string {
   return getMinimalPromptForLocale(i18n.global.locale.value as SupportedLocale);
 }
@@ -38,43 +47,53 @@ export interface EnhanceOptions {
   maxTokens?: number;
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
+/**
+ * 發送可真正取消的 LLM HTTP request。
+ *
+ * 舊版只用 Promise.race 做 timeout；計時器先 reject 後，底層 HTTP request 仍可能繼續跑。
+ * 這裡使用獨立 AbortController，timeout 或外部取消都會真正 abort fetch。
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
   ms: number,
   signal?: AbortSignal,
-): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const raceList: Promise<T>[] = [promise];
+): Promise<Response> {
+  const controller = new AbortController();
+  let didTimeout = false;
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      const err = new Error("Enhancement timeout");
-      (err as Error & { code: string }).code = "ENHANCEMENT_TIMEOUT";
-      reject(err);
-    }, ms);
-  });
-  raceList.push(timeoutPromise as Promise<T>);
+  const timeoutId = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, ms);
 
-  let abortHandler: (() => void) | undefined;
+  const abortHandler = () => {
+    controller.abort(signal?.reason);
+  };
+
   if (signal) {
-    const abortPromise = new Promise<never>((_, reject) => {
-      if (signal.aborted) {
-        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-        return;
-      }
-      abortHandler = () =>
-        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-      signal.addEventListener("abort", abortHandler, { once: true });
-    });
-    raceList.push(abortPromise as Promise<T>);
+    if (signal.aborted) {
+      clearTimeout(timeoutId);
+      throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
+    signal.addEventListener("abort", abortHandler, { once: true });
   }
 
   try {
-    return await Promise.race(raceList);
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (didTimeout) {
+      const timeoutError = new Error("Enhancement timeout");
+      (timeoutError as Error & { code: string }).code = "ENHANCEMENT_TIMEOUT";
+      throw timeoutError;
+    }
+    throw error;
   } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
-    if (abortHandler && signal)
-      signal.removeEventListener("abort", abortHandler);
+    clearTimeout(timeoutId);
+    if (signal) signal.removeEventListener("abort", abortHandler);
   }
 }
 
@@ -127,11 +146,9 @@ export async function enhanceText(
 
   const { url, init } = buildFetchParams(providerId, request, apiKey);
 
-  const response = await withTimeout(
-    fetch(url, {
-      ...init,
-      signal: options?.signal,
-    }),
+  const response = await fetchWithTimeout(
+    url,
+    init,
     getProviderTimeout(providerId),
     options?.signal,
   );
@@ -160,10 +177,18 @@ export async function enhanceText(
       }
     : null;
 
+  // 空回應不是「成功但剛好等於原文」。必須明確丟錯，讓上層記錄 wasEnhanced=false
+  // 並顯示 unenhanced fallback，而不是把 raw transcript 偽裝成 AI 整理結果。
   if (!result.text) {
-    return { text: rawText, usage };
+    throw new EnhancerEmptyResponseError();
   }
 
   const enhancedContent = stripReasoningTags(result.text);
-  return { text: enhancedContent || rawText, usage };
+  if (!enhancedContent) {
+    throw new EnhancerEmptyResponseError(
+      "Enhancement returned no content after removing reasoning tags",
+    );
+  }
+
+  return { text: enhancedContent, usage };
 }
