@@ -93,13 +93,27 @@ struct WhisperSegment {
 
 // ========== Helpers ==========
 
-fn format_whisper_prompt(term_list: &[String]) -> String {
+/// Builds a transcription hint without turning a non-Chinese or auto-detect
+/// request into Chinese.  Explicit Chinese requests always receive a
+/// Traditional-Chinese bias; vocabulary is appended to the same prompt.
+fn format_whisper_prompt(language: Option<&str>, term_list: Option<&[String]>) -> Option<String> {
+    let is_chinese = matches!(language, Some("zh"));
     let terms: Vec<&str> = term_list
+        .unwrap_or_default()
         .iter()
         .take(MAX_WHISPER_PROMPT_TERMS)
         .map(|s| s.as_str())
         .collect();
-    format!("Important Vocabulary: {}", terms.join(", "))
+
+    let mut parts = Vec::new();
+    if is_chinese {
+        parts.push("繁體中文轉錄，可能包含英文與技術名詞。".to_string());
+    }
+    if !terms.is_empty() {
+        parts.push(format!("Important Vocabulary: {}", terms.join(", ")));
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 // ========== Retry Classification (gh-10) ==========
@@ -187,11 +201,8 @@ async fn attempt_transcription_request(
         form = form.text("language", lang.to_string());
     }
 
-    if let Some(terms) = vocabulary_term_list {
-        if !terms.is_empty() {
-            let prompt = format_whisper_prompt(terms);
-            form = form.text("prompt", prompt);
-        }
+    if let Some(prompt) = format_whisper_prompt(language, vocabulary_term_list) {
+        form = form.text("prompt", prompt);
     }
 
     // Send request (reuse shared client for connection pooling)
@@ -401,9 +412,8 @@ pub async fn retranscribe_from_file(
 
     // 注意：std::fs::read 是同步 I/O，但 WAV 檔案通常很小（< 1MB），
     // 在 Tauri command 的 async context 中可接受。
-    let wav_data = std::fs::read(&file_path).map_err(|e| {
-        TranscriptionError::RequestFailed(format!("Failed to read WAV file: {e}"))
-    })?;
+    let wav_data = std::fs::read(&file_path)
+        .map_err(|e| TranscriptionError::RequestFailed(format!("Failed to read WAV file: {e}")))?;
 
     println!(
         "[transcription] Retranscribing from file: {} ({} bytes)",
@@ -453,24 +463,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_whisper_prompt_basic() {
+    fn test_format_whisper_prompt_chinese_with_vocabulary() {
         let terms = vec!["Tauri".to_string(), "Rust".to_string(), "Vue".to_string()];
-        let result = format_whisper_prompt(&terms);
-        assert_eq!(result, "Important Vocabulary: Tauri, Rust, Vue");
+        let result = format_whisper_prompt(Some("zh"), Some(&terms));
+        assert_eq!(
+            result.as_deref(),
+            Some("繁體中文轉錄，可能包含英文與技術名詞。\nImportant Vocabulary: Tauri, Rust, Vue")
+        );
     }
 
     #[test]
-    fn test_format_whisper_prompt_empty() {
+    fn test_format_whisper_prompt_chinese_without_vocabulary() {
         let terms: Vec<String> = vec![];
-        let result = format_whisper_prompt(&terms);
-        assert_eq!(result, "Important Vocabulary: ");
+        let result = format_whisper_prompt(Some("zh"), Some(&terms));
+        assert_eq!(
+            result.as_deref(),
+            Some("繁體中文轉錄，可能包含英文與技術名詞。")
+        );
     }
 
     #[test]
     fn test_format_whisper_prompt_exceeds_max() {
         let terms: Vec<String> = (0..100).map(|i| format!("term{i}")).collect();
-        let result = format_whisper_prompt(&terms);
-        // Should only include first 30 terms
+        let result = format_whisper_prompt(Some("en"), Some(&terms)).unwrap();
+        // Should only include first 50 terms.
         let parts: Vec<&str> = result
             .strip_prefix("Important Vocabulary: ")
             .unwrap()
@@ -478,7 +494,12 @@ mod tests {
             .collect();
         assert_eq!(parts.len(), MAX_WHISPER_PROMPT_TERMS);
         assert_eq!(parts[0], "term0");
-        assert_eq!(parts[29], "term29");
+        assert_eq!(parts[49], "term49");
+    }
+
+    #[test]
+    fn test_format_whisper_prompt_auto_without_vocabulary_is_omitted() {
+        assert_eq!(format_whisper_prompt(None, None), None);
     }
 
     #[test]
