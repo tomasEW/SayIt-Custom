@@ -51,7 +51,8 @@ export function findProviderConfig(
 // ── Provider Timeout ──────────────────────────────────────
 
 const PROVIDER_TIMEOUT_MS: Record<LlmProviderId, number> = {
-  groq: 5_000,
+  // SayIt Custom: 5 秒對較長的自訂 prompt 太激進，容易誤 fallback 到 raw transcript。
+  groq: 15_000,
   openai: 30_000,
   anthropic: 30_000,
   gemini: 30_000,
@@ -103,7 +104,7 @@ export interface LlmChatResult {
   usage: LlmUsageData | null;
 }
 
-// ── Provider-aware fetch 組裝 ─────────────────────────────
+// ── Provider-aware fetch 組裝 ──────────────────────────────
 
 export function getProviderIdForModel(modelId: string): LlmProviderId {
   return findLlmModelConfig(modelId)?.providerId ?? "groq";
@@ -153,7 +154,7 @@ function buildOpenAiCompatibleFetchParams(
       body.reasoning_effort = "low";
     } else if (request.model.startsWith("qwen/")) {
       // Qwen3.x 預設開啟 <think> 思考模式；"none" 完全關閉（省時間與 token，
-      // 對 5 秒 timeout 至關重要）。content 端仍保留 stripReasoningTags 兜底
+      // 對 timeout 至關重要）。content 端仍保留 stripReasoningTags 兜底
       body.reasoning_effort = "none";
     }
   }
