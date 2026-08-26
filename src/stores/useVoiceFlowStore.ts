@@ -102,6 +102,17 @@ function applyTranscriptTextTransforms(rawText: string): string {
     : rawText;
 }
 
+/** Refinement follows the selected transcription language, not only the UI locale. */
+function shouldNormalizeRefinementToTraditionalChinese(): boolean {
+  const settingsStore = useSettingsStore();
+  const transcriptionLocale = settingsStore.selectedTranscriptionLocale;
+  const effectiveLocale =
+    transcriptionLocale === "auto"
+      ? settingsStore.selectedLocale
+      : transcriptionLocale;
+  return effectiveLocale === "zh-TW";
+}
+
 const MONITOR_POLL_INTERVAL_MS = 250;
 
 export const useVoiceFlowStore = defineStore("voice-flow", () => {
@@ -1365,6 +1376,8 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
               enhancementTermList.length > 0 ? enhancementTermList : undefined,
             modelId: settingsStore.selectedLlmModelId,
             signal: abortController?.signal,
+            normalizeTraditionalChinese:
+              shouldNormalizeRefinementToTraditionalChinese(),
           };
 
           let enhanceResult = await enhanceText(
@@ -1568,6 +1581,8 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
         modelId: settingsStore.selectedLlmModelId,
         signal: abortController?.signal,
         maxTokens: EDIT_MODE_MAX_TOKENS,
+        normalizeTraditionalChinese:
+          shouldNormalizeRefinementToTraditionalChinese(),
       });
       if (isAborted.value) return;
 
@@ -1722,6 +1737,8 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
               enhancementTermList.length > 0 ? enhancementTermList : undefined,
             modelId: settingsStore.selectedLlmModelId,
             signal: abortController?.signal,
+            normalizeTraditionalChinese:
+              shouldNormalizeRefinementToTraditionalChinese(),
           });
           if (isAborted.value) return;
 

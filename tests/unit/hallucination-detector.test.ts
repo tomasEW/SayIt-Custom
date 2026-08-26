@@ -321,11 +321,11 @@ describe("hallucinationDetector.ts", () => {
       expect(result.reason).toBe("length-explosion");
     });
 
-    it("[P0] 恰好 2 倍 → 攔截（>= 觸發）", () => {
+    it("[P0] 短句即使恰好 2 倍也不攔截", () => {
       const rawText = "abc";
       const enhancedText = "abcabc"; // 恰好 2 倍
       const result = detectEnhancementAnomaly({ rawText, enhancedText });
-      expect(result.isAnomaly).toBe(true);
+      expect(result.isAnomaly).toBe(false);
     });
 
     it("[P0] 低於 2 倍一個字 → 放行", () => {
@@ -359,11 +359,11 @@ describe("hallucinationDetector.ts", () => {
       expect(result.isAnomaly).toBe(false);
     });
 
-    it("[P1] 前後空白應 trim 後計算", () => {
+    it("[P1] 前後空白應 trim 後計算，短句仍不因倍率誤殺", () => {
       const rawText = "  abc  ";
       const enhancedText = "  abcabcabcd  "; // trim 後 10 > 3*3=9
       const result = detectEnhancementAnomaly({ rawText, enhancedText });
-      expect(result.isAnomaly).toBe(true);
+      expect(result.isAnomaly).toBe(false);
     });
   });
 
@@ -413,15 +413,18 @@ describe("hallucinationDetector.ts", () => {
 
     it("[P0] 答非所問／內容不相干應判定 drift", () => {
       const r = detectSemanticDrift(
-        "今天天氣真好想出去走走曬曬太陽",
+        "今天天氣真好想出去走走曬曬太陽晚上還要和朋友一起吃飯聊天回家以後還要整理明天的工作安排",
         "好的請問有什麼可以幫您的嗎",
       );
       expect(r.isDrift).toBe(true);
       expect(r.overlapRatio).toBeLessThan(SEMANTIC_DRIFT_MIN_OVERLAP);
     });
 
-    it("[P0] 極短原文（< 6 字）豁免、不判定 drift", () => {
-      const r = detectSemanticDrift("現在幾點", "現在是下午三點整");
+    it("[P0] 短句自我修正豁免、不判定 drift", () => {
+      const r = detectSemanticDrift(
+        "明天早上十點不對下午三點開會",
+        "明天下午 3 點開會。",
+      );
       expect(r.isDrift).toBe(false);
     });
 

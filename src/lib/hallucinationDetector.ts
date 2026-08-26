@@ -101,10 +101,10 @@ export function detectEnhancementAnomaly(
  * 語意守衛：正規化後 rawText 至少要這麼長才判定。
  * 短句做刪除口頭禪、自我修正時 bigram overlap 很不穩定，因此直接豁免。
  */
-export const SEMANTIC_DRIFT_MIN_RAW_CHARS = 20;
+export const SEMANTIC_DRIFT_MIN_RAW_CHARS = 30;
 /** 語意守衛門檻：enhanced 的 bigram 落在 raw 內的比例低於此值 → 判定「內容飄走」。
  *  刻意設低（保守）：只擋「明顯不相干」，避免把合法的條列化/大幅改寫誤判成 drift。 */
-export const SEMANTIC_DRIFT_MIN_OVERLAP = 0.2;
+export const SEMANTIC_DRIFT_MIN_OVERLAP = 0.1;
 
 export interface SemanticDriftResult {
   isDrift: boolean;

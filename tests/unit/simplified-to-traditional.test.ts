@@ -27,7 +27,7 @@ describe("convertSimplifiedToTraditional（#39 簡→繁）", () => {
 
   it("[P1] 中英數混雜只轉中文字", () => {
     expect(convertSimplifiedToTraditional("请打开 GitHub issue 3")).toBe(
-      "請打開 GitHub issue 3",
+      "請開啟 GitHub issue 3",
     );
   });
 });

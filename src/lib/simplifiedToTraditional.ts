@@ -5,8 +5,7 @@
  * SayIt 過去沒有確定性的簡→繁轉換（只靠 AI 整理偶爾順手轉、不穩定）。
  * 這裡用 opencc-js 做字元級（Taiwan 標準）轉換，只在轉譯語言解析為 zh-TW 時套用。
  *
- * 用 `to: "tw"`（字元級台灣正體）而非 `"twp"`（含詞彙/慣用語轉換）：
- * 只轉字、不改用詞，避免把使用者原本的措辭改掉。
+ * 使用 `to: "twp"`，讓 LLM 在整理後新生成的簡體詞彙也能確定收斂成台灣繁中。
  */
 import { Converter } from "opencc-js";
 
@@ -15,7 +14,7 @@ let convert: ((text: string) => string) | null = null;
 /** 惰性建立 converter（載入字典有成本，建立一次即可重用）。 */
 function getConverter(): (text: string) => string {
   if (!convert) {
-    convert = Converter({ from: "cn", to: "tw" });
+    convert = Converter({ from: "cn", to: "twp" });
   }
   return convert;
 }

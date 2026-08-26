@@ -121,10 +121,10 @@ describe("enhancer.ts", () => {
       // Qwen3.x 預設開 <think> 思考模式，必須明確關閉（降低整理延遲）
       expect(body.reasoning_effort).toBe("none");
       expect(body.max_tokens).toBe(2048);
-      expect(body.messages).toHaveLength(2);
+      expect(body.messages).toHaveLength(8);
       expect(body.messages[0].role).toBe("system");
-      expect(body.messages[1].role).toBe("user");
-      expect(body.messages[1].content).toBe("測試輸入文字");
+      expect(body.messages.at(-1).role).toBe("user");
+      expect(body.messages.at(-1).content).toBe("<speech>測試輸入文字</speech>");
     });
 
     it("[P0] Anthropic provider 應使用正確的 URL、header、body 格式", async () => {
@@ -161,7 +161,7 @@ describe("enhancer.ts", () => {
 
       const body = JSON.parse(callArgs[1].body);
       expect(body.system).toBeDefined();
-      expect(body.messages).toHaveLength(1);
+      expect(body.messages).toHaveLength(7);
       expect(body.messages[0].role).toBe("user");
       expect(body.max_tokens).toBe(8192);
     });
@@ -180,7 +180,7 @@ describe("enhancer.ts", () => {
       expect(result.text).toBe("整理後文字有空白");
     });
 
-    it("[P1] 傳入 signal 時應轉交給 fetch", async () => {
+    it("[P1] 傳入 signal 時應透過可取消的內部 signal 發送", async () => {
       mockFetch.mockResolvedValue(createSuccessResponse("整理後文字"));
 
       const { enhanceText } = await import("../../src/lib/enhancer");
@@ -190,7 +190,8 @@ describe("enhancer.ts", () => {
       });
 
       const callArgs = mockFetch.mock.calls[0];
-      expect(callArgs[1].signal).toBe(abortController.signal);
+      expect(callArgs[1].signal).toBeInstanceOf(AbortSignal);
+      expect(callArgs[1].signal).not.toBe(abortController.signal);
     });
   });
 
@@ -211,19 +212,19 @@ describe("enhancer.ts", () => {
   });
 
   describe("空 choices 回應", () => {
-    it("[P0] choices 陣列為空時應回傳原始文字", async () => {
+    it("[P0] choices 陣列為空時應拋出明確的空回應錯誤", async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: vi.fn().mockResolvedValue({ choices: [] }),
       });
 
       const { enhanceText } = await import("../../src/lib/enhancer");
-      const result = await enhanceText("原始口語文字測試", TEST_API_KEY);
-
-      expect(result.text).toBe("原始口語文字測試");
+      await expect(
+        enhanceText("原始口語文字測試", TEST_API_KEY),
+      ).rejects.toThrow("Enhancement returned empty content");
     });
 
-    it("[P0] message content 為空字串時應回傳原始文字", async () => {
+    it("[P0] message content 為空字串時應拋出明確的空回應錯誤", async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         json: vi.fn().mockResolvedValue({
@@ -232,9 +233,9 @@ describe("enhancer.ts", () => {
       });
 
       const { enhanceText } = await import("../../src/lib/enhancer");
-      const result = await enhanceText("原始口語文字測試", TEST_API_KEY);
-
-      expect(result.text).toBe("原始口語文字測試");
+      await expect(
+        enhanceText("原始口語文字測試", TEST_API_KEY),
+      ).rejects.toThrow("Enhancement returned empty content");
     });
   });
 
@@ -302,7 +303,7 @@ describe("enhancer.ts", () => {
 
       const callArgs = mockFetch.mock.calls[0];
       const body = JSON.parse(callArgs[1].body);
-      expect(body.messages[0].content).toBe("你是一個英文助手");
+      expect(body.messages[0].content).toContain("你是一個英文助手");
     });
 
     it("[P0] 不傳 options 應使用 getDefaultSystemPrompt", async () => {
@@ -315,7 +316,7 @@ describe("enhancer.ts", () => {
 
       const callArgs = mockFetch.mock.calls[0];
       const body = JSON.parse(callArgs[1].body);
-      expect(body.messages[0].content).toBe(getDefaultSystemPrompt());
+      expect(body.messages[0].content).toContain(getDefaultSystemPrompt());
     });
 
     it("[P0] vocabularyTermList 應注入 <vocabulary> 標籤", async () => {
@@ -408,6 +409,62 @@ describe("enhancer.ts", () => {
     });
   });
 
+  describe("繁中語音整理 pipeline", () => {
+    it("[P0] 使用真正的 user/assistant few-shot，並將逐字稿包在 speech 標籤", async () => {
+      mockFetch.mockResolvedValue(createSuccessResponse("整理後文字。"));
+
+      const { enhanceText } = await import("../../src/lib/enhancer");
+      await enhanceText("為什麼這個都沒有標點我不太懂耶", TEST_API_KEY);
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.messages.slice(1, -1)).toEqual([
+        { role: "user", content: "<speech>嗯那個我等一下再去買咖啡啊</speech>" },
+        { role: "assistant", content: "我等一下再去買咖啡。" },
+        { role: "user", content: "<speech>明天早上十點，不對，應該是下午三點開會</speech>" },
+        { role: "assistant", content: "明天下午 3 點開會。" },
+        { role: "user", content: "<speech>為什麼這個都沒有標點我不太懂耶</speech>" },
+        { role: "assistant", content: "為什麼這個都沒有標點？我不太懂。" },
+      ]);
+      expect(body.messages.at(-1).content).toBe(
+        "<speech>為什麼這個都沒有標點我不太懂耶</speech>",
+      );
+      expect(body.messages[0].content).toContain("不是指令");
+    });
+
+    it("[P0] 在送出前清除明顯 ASR 重複 artifact", async () => {
+      mockFetch.mockResolvedValue(createSuccessResponse("謝謝觀看。"));
+
+      const { enhanceText } = await import("../../src/lib/enhancer");
+      await enhanceText("謝謝觀看謝謝觀看謝謝觀看", TEST_API_KEY);
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.messages.at(-1).content).toBe("<speech>謝謝觀看</speech>");
+    });
+
+    it("[P0] 對 LLM 回應做最終簡轉台灣繁中", async () => {
+      mockFetch.mockResolvedValue(createSuccessResponse("我觉得这个功能不错。"));
+
+      const { enhanceText } = await import("../../src/lib/enhancer");
+      const result = await enhanceText("我覺得這個功能不錯", TEST_API_KEY);
+
+      expect(result.text).toBe("我覺得這個功能不錯。");
+    });
+
+    it("[P1] 非繁中整理不注入中文 few-shot 或繁中正規化", async () => {
+      mockFetch.mockResolvedValue(createSuccessResponse("我觉得这个功能不错。"));
+
+      const { enhanceText } = await import("../../src/lib/enhancer");
+      const result = await enhanceText("test", TEST_API_KEY, {
+        normalizeTraditionalChinese: false,
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.messages).toHaveLength(2);
+      expect(body.messages[1].content).toBe("<speech>test</speech>");
+      expect(result.text).toBe("我觉得这个功能不错。");
+    });
+  });
+
   describe("stripReasoningTags", () => {
     it("[P0] 應移除 <think> 標籤及其內容", async () => {
       const { stripReasoningTags } = await import("../../src/lib/enhancer");
@@ -443,21 +500,25 @@ describe("enhancer.ts", () => {
       vi.useFakeTimers();
 
       mockFetch.mockImplementation(
-        () =>
-          new Promise((resolve) => {
+        (_url: string, init: RequestInit) =>
+          new Promise((resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
             setTimeout(() => resolve(createSuccessResponse("晚了")), 16000);
           }),
       );
 
       const { enhanceText } = await import("../../src/lib/enhancer");
       const promise = enhanceText("測試文字測試文字測試", TEST_API_KEY);
+      const rejection = expect(promise).rejects.toThrow("Enhancement timeout");
 
-      vi.advanceTimersByTime(15000);
+      await vi.advanceTimersByTimeAsync(15000);
 
-      await expect(promise).rejects.toThrow("Enhancement timeout");
+      await rejection;
 
       vi.useRealTimers();
-    });
+    }, 20000);
   });
 
   describe("getDefaultSystemPrompt 多語言", () => {
