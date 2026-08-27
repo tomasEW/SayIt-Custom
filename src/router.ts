@@ -2,7 +2,7 @@ import { createRouter, createWebHashHistory } from "vue-router";
 import DashboardView from "./views/DashboardView.vue";
 import HistoryView from "./views/HistoryView.vue";
 import DictionaryView from "./views/DictionaryView.vue";
-import SettingsView from "./views/SettingsView.vue";
+import CustomSettingsView from "./views/CustomSettingsView.vue";
 import FeatureGuideView from "./views/FeatureGuideView.vue";
 
 const router = createRouter({
@@ -12,7 +12,7 @@ const router = createRouter({
     { path: "/dashboard", component: DashboardView },
     { path: "/history", component: HistoryView },
     { path: "/dictionary", component: DictionaryView },
-    { path: "/settings", component: SettingsView },
+    { path: "/settings", component: CustomSettingsView },
     { path: "/guide", component: FeatureGuideView },
   ],
 });
