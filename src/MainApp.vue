@@ -62,7 +62,7 @@ const navItems = computed(() => [
 const route = useRoute();
 const currentPageTitle = computed(() => {
   const item = navItems.value.find((n) => route.path.startsWith(n.path));
-  return item?.label ?? "SayIt";
+  return item?.label ?? "SayIt Custom";
 });
 
 // 必須在 app.mount() 後讀取 — setDatabaseInitError 在 bootstrap catch 中已設定
@@ -266,14 +266,14 @@ onUnmounted(() => {
     data-tauri-drag-region
     class="fixed top-0 left-0 right-0 z-20 flex h-9 items-center justify-center border-b border-border bg-background"
   >
-    <span data-tauri-drag-region class="text-xs font-medium text-muted-foreground select-none">SayIt - 言</span>
+    <span data-tauri-drag-region class="text-xs font-medium text-muted-foreground select-none">SayIt Custom - 言</span>
   </div>
 
   <SidebarProvider class="h-screen !min-h-0 pt-9">
     <Sidebar collapsible="offcanvas">
       <SidebarHeader class="flex-row h-12 items-center gap-3 border-b border-sidebar-border px-4">
         <img src="@/assets/logo-yan.png" alt="言" class="h-7 w-auto" />
-        <span class="text-base font-semibold text-sidebar-foreground tracking-wide" style="font-family: 'SF Pro Display', 'Inter', system-ui, sans-serif;">SayIt</span>
+        <span class="text-base font-semibold text-sidebar-foreground tracking-wide" style="font-family: 'SF Pro Display', 'Inter', system-ui, sans-serif;">SayIt Custom</span>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>

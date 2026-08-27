@@ -31,8 +31,7 @@
       "modeUpdated": "觸發模式已更新",
       "keySet": "觸發鍵已設為 {key}",
       "customKeyDisplay": "自訂鍵 ({keycode})",
-      "doubleTapHint": "長按模式下，快速按兩下觸發鍵可切換語音模式",
-      "longPressHint": "切換模式下，長按觸發鍵超過一秒可切換語音模式",
+      "recordingOnlyHint": "錄音快捷鍵只負責開始與停止錄音；請在下方另外設定模式切換快捷鍵。",
       "comboKey": "組合鍵",
       "keys": {
         "fn": "Fn",

@@ -31,8 +31,7 @@
       "modeUpdated": "Trigger mode updated",
       "keySet": "Trigger key set to {key}",
       "customKeyDisplay": "Custom Key ({keycode})",
-      "doubleTapHint": "In Hold mode, double-tap the trigger key to switch voice mode",
-      "longPressHint": "In Toggle mode, hold the trigger key for over 1 second to switch voice mode",
+      "recordingOnlyHint": "The recording hotkey only starts and stops recording. Set a separate mode-toggle hotkey below.",
       "comboKey": "Combo Key",
       "keys": {
         "fn": "Fn",

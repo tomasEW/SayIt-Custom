@@ -35,7 +35,7 @@ import {
   HOTKEY_PRESSED,
   HOTKEY_RELEASED,
   HOTKEY_TOGGLED,
-  HOTKEY_MODE_TOGGLE,
+  HOTKEY_MODE_TOGGLE_DEDICATED,
   QUALITY_MONITOR_RESULT,
   VOICE_FLOW_STATE_CHANGED,
   CORRECTION_MONITOR_RESULT,
@@ -57,13 +57,14 @@ import {
   detectEnhancementAnomaly,
   detectSemanticDrift,
 } from "../lib/hallucinationDetector";
+import { getNextPromptModeForHotkey } from "../lib/promptModeHotkey";
 import type { HudStatus, HudTargetPosition } from "../types";
 import type { VoiceFlowStateChangedPayload } from "../types/events";
 import { useSettingsStore } from "./useSettingsStore";
 
 const SUCCESS_DISPLAY_DURATION_MS = 1000;
 const ERROR_DISPLAY_DURATION_MS = 3000;
-const MAX_ENHANCEMENT_RETRY_COUNT = 3;
+const MAX_ENHANCEMENT_RETRY_COUNT = 1;
 const ERROR_WITH_RETRY_DISPLAY_DURATION_MS = 6000;
 const START_SOUND_DURATION_MS = 400;
 const CANCELLED_DISPLAY_DURATION_MS = 1000;
@@ -146,7 +147,7 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
   let pendingSelectionCapture: Promise<void> | null = null;
   // 錄音世代編號：AX 判定（最長 600ms）與剪貼簿後備（250ms 計時器）都是
   // 非同步回呼，可能在「下一輪錄音已開始」後才落地——寫入前必須比對世代，
-  // 過期回呼直接失效（含 ESC 取消 / 雙擊切換後立刻重錄的情境）
+  // 過期回呼直接失效（含 ESC 取消後立刻重錄的情境）
   let recordingEpoch = 0;
   // 本世代的 AX 判定是否已有結論：停止錄音時若 AX 還沒回覆，
   // 保守走剪貼簿後備（等同舊行為），避免慢速 AX 讓編輯模式靜默消失
@@ -162,13 +163,10 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
       !isRetryAttempt.value,
   );
 
-  // Double-tap mode toggle state
-  let recordingStartTimestamp = 0;
-  let doubleTapResolve: ((isDoubleTap: boolean) => void) | null = null;
-  let doubleTapDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  // Dedicated mode-toggle hotkey state. Recording hotkeys never switch modes.
   const modeSwitchLabel = ref<string>("");
   let modeSwitchLabelTimer: ReturnType<typeof setTimeout> | null = null;
-  const MODE_SWITCH_LABEL_DURATION_MS = 3000;
+  const MODE_SWITCH_LABEL_DURATION_MS = 1800;
 
   let lastMonitorKey = "";
   let isRepositioning = false;
@@ -900,13 +898,6 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
     }
   }
 
-  function clearDoubleTapTimer() {
-    if (doubleTapDelayTimer) {
-      clearTimeout(doubleTapDelayTimer);
-      doubleTapDelayTimer = null;
-    }
-  }
-
   function clearModeSwitchLabelTimer() {
     if (modeSwitchLabelTimer) {
       clearTimeout(modeSwitchLabelTimer);
@@ -914,55 +905,25 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
     }
   }
 
-  /**
-   * Wait for double-tap resolution: returns true if mode-toggle event arrives
-   * within 400ms, false if timer expires (not a double-tap).
-   */
-  function waitForDoubleTapResolution(): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
-      doubleTapResolve = resolve;
-      clearDoubleTapTimer();
-      doubleTapDelayTimer = setTimeout(() => {
-        doubleTapDelayTimer = null;
-        doubleTapResolve = null;
-        resolve(false);
-      }, 400);
-    });
-  }
-
-  function handleDoubleTapModeToggle() {
-    if (doubleTapResolve) {
-      // Hold mode double-tap: resolve the waiting promise
-      clearDoubleTapTimer();
-      const resolve = doubleTapResolve;
-      doubleTapResolve = null;
-      resolve(true);
-    } else {
-      // Toggle mode long-press: directly apply mode switch
-      applyDoubleTapModeSwitch();
-    }
-  }
-
-  function applyDoubleTapModeSwitch() {
-    isRecording.value = false;
-    // 世代 +1：這輪錄音被雙擊靜默取消，途中的選取偵測回呼全部失效
-    recordingEpoch += 1;
-    pendingClipboardSelectionCheck = false;
-    pendingSelectionCapture = null;
-
-    // Toggle prompt mode: minimal ↔ active
+  function handleDedicatedModeToggle() {
     const settingsStore = useSettingsStore();
-    const currentMode = settingsStore.promptMode;
-    const nextMode = currentMode === "minimal" ? "active" : "minimal";
-    settingsStore.promptMode = nextMode;
+    if (isRecording.value) {
+      writeInfoLog("useVoiceFlowStore: dedicated mode hotkey ignored while recording");
+      return;
+    }
+
+    const nextMode = getNextPromptModeForHotkey(settingsStore.promptMode);
+    if (!nextMode) {
+      writeInfoLog("useVoiceFlowStore: dedicated mode hotkey ignored in Custom mode");
+      return;
+    }
+
     void settingsStore.savePromptMode(nextMode).catch((err) => {
       writeErrorLog(
         `useVoiceFlowStore: savePromptMode failed: ${extractErrorMessage(err)}`,
       );
     });
 
-    // Flash mode label on HUD — follow the same pattern as transitionTo("success"):
-    // show for N seconds, then transitionTo("idle") which triggers collapse animation.
     const modeLabel =
       nextMode === "minimal"
         ? t("settings.prompt.modeMinimal")
@@ -970,14 +931,12 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
     modeSwitchLabel.value = modeLabel;
     clearModeSwitchLabelTimer();
 
-    // Show HUD with mode-switch visual
     showHud().catch((err) => {
       writeErrorLog(
         `useVoiceFlowStore: showHud failed: ${extractErrorMessage(err)}`,
       );
     });
 
-    // After display duration, clear label and transition to idle (triggers collapse + hide)
     modeSwitchLabelTimer = setTimeout(() => {
       modeSwitchLabel.value = "";
       modeSwitchLabelTimer = null;
@@ -985,7 +944,7 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
     }, MODE_SWITCH_LABEL_DURATION_MS);
 
     writeInfoLog(
-      `useVoiceFlowStore: double-tap mode toggle → ${nextMode}`,
+      `useVoiceFlowStore: dedicated mode hotkey → ${nextMode}`,
     );
   }
 
@@ -1012,13 +971,6 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
       stopElapsedTimer();
     }
 
-    // Resolve pending double-tap Promise (prevents handleStopRecording from hanging)
-    if (doubleTapResolve) {
-      clearDoubleTapTimer();
-      const resolve = doubleTapResolve;
-      doubleTapResolve = null;
-      resolve(false);
-    }
     clearModeSwitchLabelTimer();
     modeSwitchLabel.value = "";
 
@@ -1042,7 +994,6 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
   async function handleStartRecording() {
     if (isRecording.value) return;
     isRecording.value = true;
-    recordingStartTimestamp = performance.now();
     isAborted.value = false;
     abortController = new AbortController();
     lastWasModified.value = null;
@@ -1111,25 +1062,6 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
   async function handleStopRecording() {
     if (!isRecording.value) return;
     if (isAborted.value) return;
-
-    // Pre-estimate duration for double-tap detection (before any async work).
-    // Use precise timestamp — recordingElapsedSeconds has 1s resolution, too coarse for 300ms threshold.
-    // Rust double-tap max hold is 300ms; 350ms here adds 50ms buffer for IPC latency.
-    const estimatedDurationMs = performance.now() - recordingStartTimestamp;
-    if (estimatedDurationMs < 350) {
-      const isDoubleTap = await waitForDoubleTapResolution();
-      if (isAborted.value) return;
-      if (isDoubleTap) {
-        // Double-tap confirmed: silently cancel, apply mode switch
-        stopElapsedTimer();
-        clearDelayedMuteTimer();
-        void restoreSystemAudio();
-        void invoke("stop_recording").catch(() => {});
-        applyDoubleTapModeSwitch();
-        return;
-      }
-      // Not a double-tap — fall through to normal stop flow
-    }
 
     clearDelayedMuteTimer();
     await restoreSystemAudio();
@@ -1963,8 +1895,8 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
           );
         },
       ),
-      listenToEvent(HOTKEY_MODE_TOGGLE, () => {
-        handleDoubleTapModeToggle();
+      listenToEvent(HOTKEY_MODE_TOGGLE_DEDICATED, () => {
+        handleDedicatedModeToggle();
       }),
       listenToEvent<HotkeyErrorPayload>(HOTKEY_ERROR, (event) => {
         const hudMessage = getHotkeyErrorMessage(event.payload.error);
@@ -1999,7 +1931,6 @@ export const useVoiceFlowStore = defineStore("voice-flow", () => {
     clearCollapseHideTimer();
     clearDelayedMuteTimer();
     clearLearnedHideTimer();
-    clearDoubleTapTimer();
     clearModeSwitchLabelTimer();
     stopMonitorPolling();
     stopElapsedTimer();

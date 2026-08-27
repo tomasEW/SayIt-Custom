@@ -31,8 +31,7 @@
       "modeUpdated": "触发模式已更新",
       "keySet": "触发键已设为 {key}",
       "customKeyDisplay": "自定义键 ({keycode})",
-      "doubleTapHint": "长按模式下，快速按两下触发键可切换语音模式",
-      "longPressHint": "切换模式下，长按触发键超过一秒可切换语音模式",
+      "recordingOnlyHint": "录音快捷键只负责开始和停止录音；请在下方另行设置模式切换快捷键。",
       "comboKey": "组合键",
       "keys": {
         "fn": "Fn",

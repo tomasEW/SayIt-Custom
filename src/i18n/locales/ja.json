@@ -31,8 +31,7 @@
       "modeUpdated": "トリガーモードが更新されました",
       "keySet": "トリガーキーを {key} に設定しました",
       "customKeyDisplay": "カスタムキー ({keycode})",
-      "doubleTapHint": "長押しモードで、トリガーキーを素早く2回押すと音声モードを切り替えます",
-      "longPressHint": "トグルモードで、トリガーキーを1秒以上長押しすると音声モードを切り替えます",
+      "recordingOnlyHint": "録音キーは録音の開始と停止だけを行います。モード切り替えキーは下で別に設定してください。",
       "comboKey": "コンボキー",
       "keys": {
         "fn": "Fn",

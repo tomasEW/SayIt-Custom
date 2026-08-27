@@ -1091,11 +1091,7 @@ onBeforeUnmount(() => {
         </p>
 
         <p class="text-xs text-muted-foreground">
-          {{
-            settingsStore.triggerMode === "hold"
-              ? $t("settings.hotkey.doubleTapHint")
-              : $t("settings.hotkey.longPressHint")
-          }}
+          {{ $t("settings.hotkey.recordingOnlyHint") }}
         </p>
 
         <transition name="feedback-fade">

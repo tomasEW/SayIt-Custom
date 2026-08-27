@@ -31,8 +31,7 @@
       "modeUpdated": "트리거 모드가 업데이트되었습니다",
       "keySet": "트리거 키가 {key}(으)로 설정되었습니다",
       "customKeyDisplay": "사용자 정의 키 ({keycode})",
-      "doubleTapHint": "홀드 모드에서 트리거 키를 빠르게 두 번 눌러 음성 모드를 전환합니다",
-      "longPressHint": "토글 모드에서 트리거 키를 1초 이상 길게 눌러 음성 모드를 전환합니다",
+      "recordingOnlyHint": "녹음 단축키는 녹음 시작과 중지만 담당합니다. 아래에서 모드 전환 단축키를 별도로 설정하세요.",
       "comboKey": "콤보 키",
       "keys": {
         "fn": "Fn",
