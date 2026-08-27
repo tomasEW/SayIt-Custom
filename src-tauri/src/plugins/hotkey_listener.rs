@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -25,22 +24,20 @@ pub enum ModifierFlag {
 #[serde(rename_all = "camelCase")]
 pub enum TriggerKey {
     // macOS keys (keycode)
-    Fn,          // 63
-    Option,      // 58 (left)
-    RightOption, // 61
-    Command,     // 55
+    Fn,
+    Option,
+    RightOption,
+    Command,
     // Windows keys (VK code)
-    RightAlt, // VK_RMENU (0xA5)
-    LeftAlt,  // VK_LMENU (0xA4)
+    RightAlt,
+    LeftAlt,
     // Cross-platform
-    Control,      // macOS: 59 (left), Windows: VK_LCONTROL (0xA2)
-    RightControl, // macOS: 62
-    Shift,        // macOS: 56, Windows: VK_LSHIFT (0xA0)
-    // User-defined key (keycode is platform-specific: macOS CGEvent keycode / Windows VK code)
-    Custom {
-        keycode: u16,
-    },
-    // Combo key: modifier(s) + primary key
+    Control,
+    RightControl,
+    Shift,
+    // User-defined key (platform-specific keycode)
+    Custom { keycode: u16 },
+    // Modifier(s) + primary key
     Combo {
         modifiers: Vec<ModifierFlag>,
         keycode: u16,
@@ -69,25 +66,6 @@ struct HotkeyEventPayload {
 }
 
 // ========== Shared State ==========
-
-struct DoubleTapState {
-    last_release_time: Option<Instant>,
-    last_hold_start: Option<Instant>,
-}
-
-impl DoubleTapState {
-    fn new() -> Self {
-        Self {
-            last_release_time: None,
-            last_hold_start: None,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.last_release_time = None;
-        self.last_hold_start = None;
-    }
-}
 
 struct RecordingState {
     is_active: bool,
@@ -125,18 +103,20 @@ struct RecordingRejectedPayload {
 }
 
 struct HotkeySharedState {
+    /// Recording hotkey. This key ONLY starts/stops recording.
     trigger_key: TriggerKey,
     trigger_mode: TriggerMode,
+    /// Dedicated prompt-mode hotkey. None means unassigned (default).
+    mode_toggle_key: Option<TriggerKey>,
     active_modifiers: HashSet<ModifierFlag>,
-    double_tap: DoubleTapState,
     recording: RecordingState,
-    toggle_long_press_fired: bool,
 }
 
 pub struct HotkeyListenerState {
     shared: Arc<Mutex<HotkeySharedState>>,
     is_pressed: Arc<AtomicBool>,
     is_toggled_on: Arc<AtomicBool>,
+    mode_toggle_pressed: Arc<AtomicBool>,
     #[cfg(target_os = "macos")]
     run_loop_ref: Arc<Mutex<Option<core_foundation::runloop::CFRunLoop>>>,
 }
@@ -147,6 +127,7 @@ impl Clone for HotkeyListenerState {
             shared: self.shared.clone(),
             is_pressed: self.is_pressed.clone(),
             is_toggled_on: self.is_toggled_on.clone(),
+            mode_toggle_pressed: self.mode_toggle_pressed.clone(),
             #[cfg(target_os = "macos")]
             run_loop_ref: self.run_loop_ref.clone(),
         }
@@ -157,8 +138,8 @@ impl HotkeyListenerState {
     pub fn reset_key_states(&self) {
         self.is_pressed.store(false, Ordering::SeqCst);
         self.is_toggled_on.store(false, Ordering::SeqCst);
+        self.mode_toggle_pressed.store(false, Ordering::SeqCst);
         if let Ok(mut shared) = self.shared.lock() {
-            shared.double_tap.clear();
             shared.active_modifiers.clear();
         }
     }
@@ -167,11 +148,18 @@ impl HotkeyListenerState {
         if let Ok(mut shared) = self.shared.lock() {
             shared.trigger_key = key;
             shared.trigger_mode = mode;
-            shared.double_tap.clear();
             shared.active_modifiers.clear();
         }
         self.is_pressed.store(false, Ordering::SeqCst);
         self.is_toggled_on.store(false, Ordering::SeqCst);
+    }
+
+    pub fn update_mode_toggle_config(&self, key: Option<TriggerKey>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.mode_toggle_key = key;
+            shared.active_modifiers.clear();
+        }
+        self.mode_toggle_pressed.store(false, Ordering::SeqCst);
     }
 
     #[cfg(target_os = "macos")]
@@ -183,41 +171,7 @@ impl HotkeyListenerState {
     pub fn shutdown(&self) {}
 }
 
-// ========== Double-tap Detection ==========
-
-const DOUBLE_TAP_MAX_HOLD_MS: u128 = 300;
-const DOUBLE_TAP_MAX_GAP_MS: u128 = 350;
-const TOGGLE_LONG_PRESS_MS: u128 = 1000;
-
-/// Check if current press qualifies as double-tap (must be Hold mode).
-fn check_double_tap(shared: &HotkeySharedState) -> bool {
-    if shared.trigger_mode != TriggerMode::Hold {
-        return false;
-    }
-    if let Some(last_release) = shared.double_tap.last_release_time {
-        let gap = last_release.elapsed().as_millis();
-        gap < DOUBLE_TAP_MAX_GAP_MS
-    } else {
-        false
-    }
-}
-
-/// Record release timing for double-tap detection.
-fn record_release_for_double_tap(shared: &mut HotkeySharedState) {
-    if let Some(hold_start) = shared.double_tap.last_hold_start.take() {
-        let hold_duration = hold_start.elapsed().as_millis();
-        if hold_duration > DOUBLE_TAP_MAX_HOLD_MS {
-            // Long hold — not a tap, reset
-            shared.double_tap.last_release_time = None;
-        } else {
-            shared.double_tap.last_release_time = Some(Instant::now());
-        }
-    } else {
-        shared.double_tap.last_release_time = None;
-    }
-}
-
-// ========== Combo Matching ==========
+// ========== Matching ==========
 
 fn matches_combo_trigger(
     keycode: u16,
@@ -225,14 +179,9 @@ fn matches_combo_trigger(
     combo_keycode: u16,
     active_mods: &HashSet<ModifierFlag>,
 ) -> bool {
-    // Combo requires at least one modifier — empty modifiers should use Custom variant
-    if combo_modifiers.is_empty() {
+    if combo_modifiers.is_empty() || keycode != combo_keycode {
         return false;
     }
-    if keycode != combo_keycode {
-        return false;
-    }
-    // ESC is reserved — never allow as combo primary key
     #[cfg(target_os = "macos")]
     if combo_keycode == 53 {
         return false;
@@ -241,14 +190,11 @@ fn matches_combo_trigger(
     if combo_keycode == 0x1B {
         return false;
     }
-    // Exact match: required modifiers must be held AND no extra modifiers
     combo_modifiers.len() == active_mods.len()
         && combo_modifiers.iter().all(|m| active_mods.contains(m))
 }
 
-// ========== Event Handling ==========
-
-fn handle_key_event<R: Runtime>(
+fn handle_recording_key_event<R: Runtime>(
     app_handle: &AppHandle<R>,
     pressed: bool,
     state: &HotkeyListenerState,
@@ -257,20 +203,6 @@ fn handle_key_event<R: Runtime>(
     match mode {
         TriggerMode::Hold => {
             if pressed {
-                // Record hold start for double-tap
-                if let Ok(mut shared) = state.shared.lock() {
-                    shared.double_tap.last_hold_start = Some(Instant::now());
-
-                    // Check double-tap before emitting press
-                    if check_double_tap(&shared) {
-                        shared.double_tap.clear();
-                        drop(shared);
-                        println!("[hotkey-listener] double-tap detected, emitting mode-toggle");
-                        let _ = app_handle.emit("hotkey:mode-toggle", ());
-                        return;
-                    }
-                }
-
                 if !state.is_pressed.swap(true, Ordering::SeqCst) {
                     let _ = app_handle.emit(
                         "hotkey:pressed",
@@ -281,11 +213,6 @@ fn handle_key_event<R: Runtime>(
                     );
                 }
             } else if state.is_pressed.swap(false, Ordering::SeqCst) {
-                // Record release for double-tap
-                if let Ok(mut shared) = state.shared.lock() {
-                    record_release_for_double_tap(&mut shared);
-                }
-
                 let _ = app_handle.emit(
                     "hotkey:released",
                     HotkeyEventPayload {
@@ -297,59 +224,43 @@ fn handle_key_event<R: Runtime>(
         }
         TriggerMode::Toggle => {
             if pressed && !state.is_pressed.swap(true, Ordering::SeqCst) {
-                // Reset long-press flag and spawn delayed thread for 1s detection
-                if let Ok(mut shared) = state.shared.lock() {
-                    shared.toggle_long_press_fired = false;
-                }
-
-                let is_pressed_clone = state.is_pressed.clone();
-                let shared_clone = state.shared.clone();
-                let app_handle_clone = app_handle.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        TOGGLE_LONG_PRESS_MS as u64,
-                    ));
-                    // After 1s: if still pressed, fire mode-toggle
-                    if is_pressed_clone.load(Ordering::SeqCst) {
-                        if let Ok(mut shared) = shared_clone.lock() {
-                            shared.toggle_long_press_fired = true;
-                        }
-                        println!(
-                            "[hotkey-listener] toggle long-press detected, emitting mode-toggle"
-                        );
-                        let _ = app_handle_clone.emit("hotkey:mode-toggle", ());
-                    }
-                });
+                // Toggle mode reacts on key release so holding the recording key has
+                // no hidden secondary action.
             } else if !pressed && state.is_pressed.swap(false, Ordering::SeqCst) {
-                // On release: if long-press already fired, do nothing. Otherwise normal toggle.
-                let was_long_press = state
-                    .shared
-                    .lock()
-                    .map(|s| s.toggle_long_press_fired)
-                    .unwrap_or(false);
-
-                if !was_long_press {
-                    // Short press → normal toggle
-                    let was_on = state.is_toggled_on.fetch_xor(true, Ordering::SeqCst);
-                    let action = if was_on {
-                        HotkeyAction::Stop
-                    } else {
-                        HotkeyAction::Start
-                    };
-                    let _ = app_handle.emit(
-                        "hotkey:toggled",
-                        HotkeyEventPayload {
-                            mode: TriggerMode::Toggle,
-                            action,
-                        },
-                    );
-                }
+                let was_on = state.is_toggled_on.fetch_xor(true, Ordering::SeqCst);
+                let action = if was_on {
+                    HotkeyAction::Stop
+                } else {
+                    HotkeyAction::Start
+                };
+                let _ = app_handle.emit(
+                    "hotkey:toggled",
+                    HotkeyEventPayload {
+                        mode: TriggerMode::Toggle,
+                        action,
+                    },
+                );
             }
         }
     }
 }
 
-// ========== macOS Implementation ==========
+fn handle_mode_toggle_key_event<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    pressed: bool,
+    state: &HotkeyListenerState,
+) {
+    if pressed {
+        if !state.mode_toggle_pressed.swap(true, Ordering::SeqCst) {
+            println!("[hotkey-listener] dedicated mode-toggle hotkey pressed");
+            let _ = app_handle.emit("hotkey:mode-toggle-dedicated", ());
+        }
+    } else {
+        state.mode_toggle_pressed.store(false, Ordering::SeqCst);
+    }
+}
+
+// ========== macOS ==========
 
 #[cfg(target_os = "macos")]
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -389,7 +300,6 @@ pub fn check_accessibility_permission_command() -> bool {
     {
         check_accessibility_permission()
     }
-
     #[cfg(not(target_os = "macos"))]
     {
         true
@@ -405,7 +315,6 @@ pub fn open_accessibility_settings() -> Result<(), String> {
             .spawn()
             .map_err(|err| err.to_string())?;
     }
-
     Ok(())
 }
 
@@ -424,13 +333,11 @@ fn prompt_accessibility_permission() {
     let key = CFString::new("AXTrustedCheckOptionPrompt");
     let value = CFBoolean::true_value();
     let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
-
     unsafe {
         AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as *const c_void);
     }
 }
 
-/// Match macOS keycode to configured trigger key (single keys only, not Combo)
 #[cfg(target_os = "macos")]
 fn matches_trigger_key_macos(keycode: u16, trigger_key: &TriggerKey) -> bool {
     match trigger_key {
@@ -442,12 +349,11 @@ fn matches_trigger_key_macos(keycode: u16, trigger_key: &TriggerKey) -> bool {
         TriggerKey::Command => keycode == macos_keycodes::COMMAND_L,
         TriggerKey::Shift => keycode == macos_keycodes::SHIFT_L,
         TriggerKey::Custom { keycode: custom_kc } => keycode == *custom_kc,
-        TriggerKey::Combo { .. } => false, // Combo matching handled separately
-        _ => false,                        // Windows-only keys
+        TriggerKey::Combo { .. } => false,
+        _ => false,
     }
 }
 
-/// Determine press/release state from CGEventFlags for a modifier key
 #[cfg(target_os = "macos")]
 fn is_modifier_pressed(flags: CGEventFlags, trigger_key: &TriggerKey) -> Option<bool> {
     match trigger_key {
@@ -480,7 +386,6 @@ fn is_modifier_pressed(flags: CGEventFlags, trigger_key: &TriggerKey) -> Option<
     }
 }
 
-/// Extract active modifier flags from CGEventFlags
 #[cfg(target_os = "macos")]
 fn extract_active_modifiers_macos(flags: CGEventFlags) -> HashSet<ModifierFlag> {
     let mut mods = HashSet::new();
@@ -502,7 +407,6 @@ fn extract_active_modifiers_macos(flags: CGEventFlags) -> HashSet<ModifierFlag> 
     mods
 }
 
-/// Check if a macOS keycode represents a modifier key (for recording mode)
 #[cfg(target_os = "macos")]
 fn is_modifier_keycode_macos(keycode: u16) -> bool {
     matches!(
@@ -519,10 +423,8 @@ fn is_modifier_keycode_macos(keycode: u16) -> bool {
     )
 }
 
-/// Handle key events during recording mode (macOS).
-/// Accumulates modifiers, captures primary key or single modifier, rejects ESC.
 #[cfg(target_os = "macos")]
-fn handle_recording_event_macos<R: Runtime>(
+fn handle_recording_capture_event_macos<R: Runtime>(
     app_handle: &AppHandle<R>,
     event_type: CGEventType,
     keycode: u16,
@@ -531,35 +433,19 @@ fn handle_recording_event_macos<R: Runtime>(
 ) {
     match event_type {
         CGEventType::FlagsChanged => {
-            // Fn key (keycode 63): toggle-based detection.
-            // First FlagsChanged with keycode 63 = Fn pressed → accumulate like a modifier.
-            // Second FlagsChanged with keycode 63 = Fn released → if no primary key was pressed,
-            // capture as single key.
             if keycode == macos_keycodes::FN {
                 let mut shared = match state.shared.lock() {
                     Ok(g) => g,
                     Err(_) => return,
                 };
-                let fn_already_tracked = shared.recording.last_modifier_keycode
-                    == Some(macos_keycodes::FN)
-                    || shared
-                        .recording
-                        .accumulated_modifiers
-                        .contains(&ModifierFlag::Fn);
-
-                if !fn_already_tracked {
-                    // Fn pressed (first toggle): accumulate as modifier, wait for primary key
-                    shared
-                        .recording
-                        .accumulated_modifiers
-                        .insert(ModifierFlag::Fn);
+                let tracked = shared.recording.last_modifier_keycode == Some(macos_keycodes::FN)
+                    || shared.recording.accumulated_modifiers.contains(&ModifierFlag::Fn);
+                if !tracked {
+                    shared.recording.accumulated_modifiers.insert(ModifierFlag::Fn);
                     shared.recording.last_modifier_keycode = Some(macos_keycodes::FN);
-                    println!("[hotkey-listener] recording: Fn pressed, accumulated as modifier");
                 } else {
-                    // Fn released (second toggle): no primary key was pressed → single Fn capture
                     shared.recording.reset();
                     drop(shared);
-                    println!("[hotkey-listener] recording: captured Fn (single, toggle release)");
                     let _ = app_handle.emit(
                         "hotkey:recording-captured",
                         RecordingCapturedPayload {
@@ -571,30 +457,20 @@ fn handle_recording_event_macos<R: Runtime>(
                 return;
             }
 
-            // Standard modifiers (Command, Control, Option, Shift)
-            // Exclude Fn from flag-based detection — Fn is handled above via keycode toggle
             let mut current_mods = extract_active_modifiers_macos(flags);
             current_mods.remove(&ModifierFlag::Fn);
-
             let mut shared = match state.shared.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
-
             if !current_mods.is_empty() {
-                // Modifiers pressed: accumulate and track keycode
                 shared.recording.accumulated_modifiers = current_mods;
                 if is_modifier_keycode_macos(keycode) {
                     shared.recording.last_modifier_keycode = Some(keycode);
                 }
-            } else if shared.recording.last_modifier_keycode.is_some() {
-                // All modifiers released without a primary key → single modifier capture
-                let last_kc = shared.recording.last_modifier_keycode.unwrap();
+            } else if let Some(last_kc) = shared.recording.last_modifier_keycode {
                 shared.recording.reset();
                 drop(shared);
-                println!(
-                    "[hotkey-listener] recording: captured single modifier keycode={last_kc}"
-                );
                 let _ = app_handle.emit(
                     "hotkey:recording-captured",
                     RecordingCapturedPayload {
@@ -609,8 +485,6 @@ fn handle_recording_event_macos<R: Runtime>(
                 Ok(g) => g,
                 Err(_) => return,
             };
-
-            // ESC: reject (reserved key)
             if keycode == macos_keycodes::ESCAPE {
                 shared.recording.reset();
                 drop(shared);
@@ -622,19 +496,9 @@ fn handle_recording_event_macos<R: Runtime>(
                 );
                 return;
             }
-
-            // Non-modifier key pressed: capture with accumulated modifiers
-            let mods: Vec<ModifierFlag> = shared
-                .recording
-                .accumulated_modifiers
-                .iter()
-                .cloned()
-                .collect();
+            let mods = shared.recording.accumulated_modifiers.iter().cloned().collect();
             shared.recording.reset();
             drop(shared);
-            println!(
-                "[hotkey-listener] recording: captured keycode={keycode}, modifiers={mods:?}"
-            );
             let _ = app_handle.emit(
                 "hotkey:recording-captured",
                 RecordingCapturedPayload {
@@ -643,18 +507,79 @@ fn handle_recording_event_macos<R: Runtime>(
                 },
             );
         }
-        _ => {} // Ignore KeyUp during recording
+        _ => {}
     }
+}
+
+#[cfg(target_os = "macos")]
+fn process_trigger_macos<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    event_type: CGEventType,
+    keycode: u16,
+    flags: CGEventFlags,
+    trigger: &TriggerKey,
+    active_mods: &HashSet<ModifierFlag>,
+    pressed_state: &AtomicBool,
+    on_event: impl Fn(bool),
+) -> bool {
+    if let TriggerKey::Combo {
+        modifiers,
+        keycode: combo_kc,
+    } = trigger
+    {
+        match event_type {
+            CGEventType::KeyDown if keycode == *combo_kc => {
+                if matches_combo_trigger(keycode, modifiers, *combo_kc, active_mods) {
+                    on_event(true);
+                }
+                return true;
+            }
+            CGEventType::KeyUp if keycode == *combo_kc => {
+                on_event(false);
+                return true;
+            }
+            CGEventType::FlagsChanged if pressed_state.load(Ordering::SeqCst) => {
+                if !modifiers.iter().all(|m| active_mods.contains(m)) {
+                    on_event(false);
+                }
+                return true;
+            }
+            _ => return false,
+        }
+    }
+
+    match event_type {
+        CGEventType::FlagsChanged => {
+            if matches_trigger_key_macos(keycode, trigger) {
+                if let Some(pressed) = is_modifier_pressed(flags, trigger) {
+                    on_event(pressed);
+                    return true;
+                }
+            }
+        }
+        CGEventType::KeyDown => {
+            if matches_trigger_key_macos(keycode, trigger) {
+                on_event(true);
+                return true;
+            }
+        }
+        CGEventType::KeyUp => {
+            if matches_trigger_key_macos(keycode, trigger) {
+                on_event(false);
+                return true;
+            }
+        }
+        _ => {}
+    }
+    let _ = app_handle;
+    false
 }
 
 #[cfg(target_os = "macos")]
 fn start_event_tap<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerState) {
     let run_loop_ref = state.run_loop_ref.clone();
     std::thread::spawn(move || {
-        println!("[hotkey-listener] Creating CGEventTap on thread...");
-
         let app_handle_error = app_handle.clone();
-
         let tap_result = CGEventTap::new(
             CGEventTapLocation::Session,
             CGEventTapPlacement::HeadInsertEventTap,
@@ -668,143 +593,71 @@ fn start_event_tap<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerSt
                 let keycode = event.get_integer_value_field(
                     core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
                 ) as u16;
+                let flags = event.get_flags();
 
-                // Recording mode: delegate to recording handler, skip all trigger logic
-                {
-                    let is_recording = state
-                        .shared
-                        .lock()
-                        .map(|s| s.recording.is_active)
-                        .unwrap_or(false);
-                    if is_recording {
-                        handle_recording_event_macos(
-                            &app_handle,
-                            event_type,
-                            keycode,
-                            event.get_flags(),
-                            &state,
-                        );
-                        return None;
-                    }
+                let is_recording_capture = state
+                    .shared
+                    .lock()
+                    .map(|s| s.recording.is_active)
+                    .unwrap_or(false);
+                if is_recording_capture {
+                    handle_recording_capture_event_macos(
+                        &app_handle,
+                        event_type,
+                        keycode,
+                        flags,
+                        &state,
+                    );
+                    return None;
                 }
 
-                // Single lock: read trigger config + update active modifiers + snapshot
-                let (trigger, mode, active_mods_snapshot) = {
+                if event_type == CGEventType::KeyDown && keycode == macos_keycodes::ESCAPE {
+                    let _ = app_handle.emit("escape:pressed", ());
+                    return None;
+                }
+
+                let (recording_trigger, mode, mode_toggle_key, active_mods) = {
                     let mut shared = match state.shared.lock() {
                         Ok(g) => g,
                         Err(_) => return None,
                     };
-
-                    // Update active modifiers on FlagsChanged (for combo matching)
-                    if matches!(event_type, CGEventType::FlagsChanged) {
-                        let flags = event.get_flags();
+                    if event_type == CGEventType::FlagsChanged {
                         shared.active_modifiers = extract_active_modifiers_macos(flags);
                     }
-
-                    let mods = shared.active_modifiers.clone();
                     (
                         shared.trigger_key.clone(),
                         shared.trigger_mode.clone(),
-                        mods,
+                        shared.mode_toggle_key.clone(),
+                        shared.active_modifiers.clone(),
                     )
                 };
 
-                match event_type {
-                    CGEventType::FlagsChanged => {
-                        let flags = event.get_flags();
+                // Recording hotkey always takes precedence when the two are configured
+                // identically. This prevents a recording key from ever switching modes.
+                let recording_matched = process_trigger_macos(
+                    &app_handle,
+                    event_type,
+                    keycode,
+                    flags,
+                    &recording_trigger,
+                    &active_mods,
+                    &state.is_pressed,
+                    |pressed| handle_recording_key_event(&app_handle, pressed, &state, &mode),
+                );
 
-                        // Combo trigger: check if required modifiers disappeared → release
-                        // Use active_mods_snapshot (already extracted in the single lock above)
-                        if let TriggerKey::Combo { ref modifiers, .. } = trigger {
-                            let all_held =
-                                modifiers.iter().all(|m| active_mods_snapshot.contains(m));
-                            let was_pressed = state.is_pressed.load(Ordering::SeqCst);
-                            if !all_held && was_pressed {
-                                // A required modifier was released → stop
-                                handle_key_event(&app_handle, false, &state, &mode);
-                            }
-                            return None;
-                        }
-
-                        // Single-key triggers (existing logic)
-                        if trigger == TriggerKey::Fn {
-                            if keycode == macos_keycodes::FN {
-                                let fn_flag = flags.contains(CGEventFlags::CGEventFlagSecondaryFn);
-                                handle_key_event(&app_handle, fn_flag, &state, &mode);
-                            }
-                        } else if let TriggerKey::Custom { keycode: custom_kc } = &trigger {
-                            if keycode == *custom_kc {
-                                if let Some(pressed) = is_modifier_pressed(flags, &trigger) {
-                                    handle_key_event(&app_handle, pressed, &state, &mode);
-                                } else {
-                                    let was_pressed = state.is_pressed.load(Ordering::SeqCst);
-                                    handle_key_event(&app_handle, !was_pressed, &state, &mode);
-                                }
-                            }
-                        } else if matches_trigger_key_macos(keycode, &trigger) {
-                            if let Some(pressed) = is_modifier_pressed(flags, &trigger) {
-                                handle_key_event(&app_handle, pressed, &state, &mode);
-                            }
-                        }
+                if !recording_matched {
+                    if let Some(mode_key) = mode_toggle_key {
+                        process_trigger_macos(
+                            &app_handle,
+                            event_type,
+                            keycode,
+                            flags,
+                            &mode_key,
+                            &active_mods,
+                            &state.mode_toggle_pressed,
+                            |pressed| handle_mode_toggle_key_event(&app_handle, pressed, &state),
+                        );
                     }
-                    CGEventType::KeyDown => {
-                        // ESC key: always emit, also clears double-tap state
-                        if keycode == macos_keycodes::ESCAPE {
-                            if let Ok(mut shared) = state.shared.lock() {
-                                shared.double_tap.clear();
-                            }
-                            let _ = app_handle.emit("escape:pressed", ());
-                            return None;
-                        }
-
-                        // Combo trigger: check primary key + modifiers (using snapshot from initial lock)
-                        if let TriggerKey::Combo {
-                            ref modifiers,
-                            keycode: combo_kc,
-                        } = trigger
-                        {
-                            if matches_combo_trigger(
-                                keycode,
-                                modifiers,
-                                combo_kc,
-                                &active_mods_snapshot,
-                            ) {
-                                handle_key_event(&app_handle, true, &state, &mode);
-                            }
-                            return None;
-                        }
-
-                        // Single-key triggers
-                        if trigger == TriggerKey::Fn && keycode == macos_keycodes::FN {
-                            handle_key_event(&app_handle, true, &state, &mode);
-                        } else if let TriggerKey::Custom { keycode: custom_kc } = &trigger {
-                            if keycode == *custom_kc {
-                                handle_key_event(&app_handle, true, &state, &mode);
-                            }
-                        }
-                    }
-                    CGEventType::KeyUp => {
-                        // Combo trigger: primary key released → stop
-                        if let TriggerKey::Combo {
-                            keycode: combo_kc, ..
-                        } = &trigger
-                        {
-                            if keycode == *combo_kc {
-                                handle_key_event(&app_handle, false, &state, &mode);
-                            }
-                            return None;
-                        }
-
-                        // Single-key triggers
-                        if trigger == TriggerKey::Fn && keycode == macos_keycodes::FN {
-                            handle_key_event(&app_handle, false, &state, &mode);
-                        } else if let TriggerKey::Custom { keycode: custom_kc } = &trigger {
-                            if keycode == *custom_kc {
-                                handle_key_event(&app_handle, false, &state, &mode);
-                            }
-                        }
-                    }
-                    _ => {}
                 }
 
                 None
@@ -812,33 +665,24 @@ fn start_event_tap<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerSt
         );
 
         match tap_result {
-            Ok(tap) => {
-                println!("[hotkey-listener] CGEventTap created successfully");
-                unsafe {
-                    let loop_source = tap
-                        .mach_port
-                        .create_runloop_source(0)
-                        .expect("Failed to create runloop source");
-                    let current_run_loop = CFRunLoop::get_current();
-                    current_run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
-                    tap.enable();
-                    if let Ok(mut guard) = run_loop_ref.lock() {
-                        *guard = Some(current_run_loop);
-                    }
-                    println!("[hotkey-listener] RunLoop started, listening for hotkey events...");
-                    CFRunLoop::run_current();
-                    if let Ok(mut guard) = run_loop_ref.lock() {
-                        *guard = None;
-                    }
-                    println!("[hotkey-listener] RunLoop stopped");
+            Ok(tap) => unsafe {
+                let loop_source = tap
+                    .mach_port
+                    .create_runloop_source(0)
+                    .expect("Failed to create runloop source");
+                let current_run_loop = CFRunLoop::get_current();
+                current_run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
+                tap.enable();
+                if let Ok(mut guard) = run_loop_ref.lock() {
+                    *guard = Some(current_run_loop);
                 }
-            }
+                println!("[hotkey-listener] RunLoop started");
+                CFRunLoop::run_current();
+                if let Ok(mut guard) = run_loop_ref.lock() {
+                    *guard = None;
+                }
+            },
             Err(()) => {
-                eprintln!("[hotkey-listener] ERROR: Failed to create CGEventTap!");
-                eprintln!(
-                    "[hotkey-listener] Go to System Settings > Privacy & Security > Accessibility"
-                );
-                eprintln!("[hotkey-listener] and add this application.");
                 let _ = app_handle_error.emit(
                     "hotkey:error",
                     serde_json::json!({
@@ -856,15 +700,15 @@ fn stop_existing_event_tap(run_loop_ref: &Arc<Mutex<Option<core_foundation::runl
     if let Ok(guard) = run_loop_ref.lock() {
         if let Some(ref rl) = *guard {
             rl.stop();
-            println!("[hotkey-listener] Stopped existing CFRunLoop");
         }
     }
 }
 
+// ========== Commands used by existing app invoke handler ==========
+
 #[tauri::command]
 pub fn reset_hotkey_state(state: tauri::State<'_, HotkeyListenerState>) {
     state.reset_key_states();
-    println!("[hotkey-listener] Key states reset via command");
 }
 
 #[tauri::command]
@@ -874,7 +718,7 @@ pub fn start_hotkey_recording(state: tauri::State<'_, HotkeyListenerState>) {
         shared.recording.is_active = true;
     }
     state.is_pressed.store(false, Ordering::SeqCst);
-    println!("[hotkey-listener] Recording mode started");
+    state.mode_toggle_pressed.store(false, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -882,7 +726,6 @@ pub fn cancel_hotkey_recording(state: tauri::State<'_, HotkeyListenerState>) {
     if let Ok(mut shared) = state.shared.lock() {
         shared.recording.reset();
     }
-    println!("[hotkey-listener] Recording mode cancelled");
 }
 
 #[tauri::command]
@@ -892,22 +735,14 @@ pub fn reinitialize_hotkey_listener<R: Runtime>(app: AppHandle<R>) -> Result<(),
         if !check_accessibility_permission() {
             return Err("Accessibility permission not granted".to_string());
         }
-
         let state = app.state::<HotkeyListenerState>();
-
         stop_existing_event_tap(&state.run_loop_ref);
-
         std::thread::sleep(std::time::Duration::from_millis(200));
-
         state.reset_key_states();
-
         let hook_state = state.inner().clone();
         start_event_tap(app, hook_state);
-
-        println!("[hotkey-listener] Reinitialized hotkey listener");
         Ok(())
     }
-
     #[cfg(not(target_os = "macos"))]
     {
         let _ = &app;
@@ -915,14 +750,13 @@ pub fn reinitialize_hotkey_listener<R: Runtime>(app: AppHandle<R>) -> Result<(),
     }
 }
 
-// ========== Windows Implementation ==========
+// ========== Windows ==========
 
 #[cfg(target_os = "windows")]
 mod windows_hook {
     use super::*;
     use std::sync::OnceLock;
 
-    // Windows VK codes
     const VK_LSHIFT: u32 = 0xA0;
     const VK_LCONTROL: u32 = 0xA2;
     const VK_RCONTROL: u32 = 0xA3;
@@ -930,8 +764,6 @@ mod windows_hook {
     const VK_RMENU: u32 = 0xA5;
     const VK_ESCAPE: u32 = 0x1B;
     const VK_F23: u32 = 0x86;
-
-    // Windows modifier VK codes for combo detection
     const VK_LWIN: u32 = 0x5B;
     const VK_RWIN: u32 = 0x5C;
 
@@ -940,7 +772,9 @@ mod windows_hook {
     struct HookContext {
         shared: Arc<Mutex<HotkeySharedState>>,
         is_pressed: Arc<AtomicBool>,
+        mode_toggle_pressed: Arc<AtomicBool>,
         key_handler: KeyHandler,
+        mode_toggle_handler: Box<dyn Fn(bool) + Send + Sync>,
         escape_handler: Box<dyn Fn() + Send + Sync>,
         recording_captured_handler: Box<dyn Fn(RecordingCapturedPayload) + Send + Sync>,
         recording_rejected_handler: Box<dyn Fn(RecordingRejectedPayload) + Send + Sync>,
@@ -955,72 +789,11 @@ mod windows_hook {
         )
     }
 
-    fn handle_recording_event_windows(ctx: &HookContext, vk: u16, is_key_down: bool) {
-        if is_key_down {
-            // ESC: reject
-            if vk as u32 == VK_ESCAPE {
-                if let Ok(mut shared) = ctx.shared.try_lock() {
-                    shared.recording.reset();
-                }
-                (ctx.recording_rejected_handler)(RecordingRejectedPayload {
-                    reason: "esc_reserved".to_string(),
-                });
-                return;
-            }
-
-            if is_modifier_vk(vk as u32) {
-                // Modifier pressed: accumulate
-                if let Ok(mut shared) = ctx.shared.try_lock() {
-                    let mods = unsafe { get_active_modifiers_windows() };
-                    shared.recording.accumulated_modifiers = mods;
-                    shared.recording.last_modifier_keycode = Some(vk);
-                }
-            } else {
-                // Non-modifier key pressed: capture with accumulated modifiers
-                let mods = if let Ok(mut shared) = ctx.shared.try_lock() {
-                    let m: Vec<ModifierFlag> = shared
-                        .recording
-                        .accumulated_modifiers
-                        .iter()
-                        .cloned()
-                        .collect();
-                    shared.recording.reset();
-                    m
-                } else {
-                    vec![]
-                };
-                (ctx.recording_captured_handler)(RecordingCapturedPayload {
-                    keycode: vk,
-                    modifiers: mods,
-                });
-            }
-        } else {
-            // Key up: check if modifier released and all modifiers gone
-            if is_modifier_vk(vk as u32) {
-                let all_released = unsafe { get_active_modifiers_windows().is_empty() };
-                if all_released {
-                    if let Ok(mut shared) = ctx.shared.try_lock() {
-                        if let Some(last_kc) = shared.recording.last_modifier_keycode.take() {
-                            shared.recording.reset();
-                            drop(shared);
-                            (ctx.recording_captured_handler)(RecordingCapturedPayload {
-                                keycode: last_kc,
-                                modifiers: vec![],
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Check if a Windows VK key is currently pressed via GetKeyState
     unsafe fn is_vk_pressed(vk: i32) -> bool {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
         (GetKeyState(vk) & (0x8000u16 as i16)) != 0
     }
 
-    /// Get active modifier flags using GetKeyState (Windows)
     unsafe fn get_active_modifiers_windows() -> HashSet<ModifierFlag> {
         let mut mods = HashSet::new();
         if is_vk_pressed(VK_LWIN as i32) || is_vk_pressed(VK_RWIN as i32) {
@@ -1033,25 +806,117 @@ mod windows_hook {
             mods.insert(ModifierFlag::Option);
         }
         if is_vk_pressed(VK_LSHIFT as i32) || is_vk_pressed(0xA1) {
-            // 0xA1 = VK_RSHIFT
             mods.insert(ModifierFlag::Shift);
         }
         mods
     }
 
+    fn matches_single_windows(vk: u32, key: &TriggerKey) -> bool {
+        match key {
+            TriggerKey::RightAlt => vk == VK_RMENU,
+            TriggerKey::LeftAlt => vk == VK_LMENU,
+            TriggerKey::Control => vk == VK_LCONTROL,
+            TriggerKey::RightControl => vk == VK_RCONTROL,
+            TriggerKey::Shift => vk == VK_LSHIFT,
+            TriggerKey::Custom { keycode } => vk == *keycode as u32,
+            _ => false,
+        }
+    }
+
+    fn trigger_matches_windows(
+        vk: u32,
+        is_key_down: bool,
+        key: &TriggerKey,
+        active_mods: &HashSet<ModifierFlag>,
+        pressed_state: &AtomicBool,
+    ) -> Option<bool> {
+        if let TriggerKey::Combo {
+            modifiers,
+            keycode,
+        } = key
+        {
+            if vk == *keycode as u32 {
+                if is_key_down {
+                    if matches_combo_trigger(*keycode, modifiers, *keycode, active_mods) {
+                        return Some(true);
+                    }
+                } else {
+                    return Some(false);
+                }
+            } else if !is_key_down && pressed_state.load(Ordering::SeqCst) {
+                if !modifiers.iter().all(|m| active_mods.contains(m)) {
+                    return Some(false);
+                }
+            }
+            return None;
+        }
+        matches_single_windows(vk, key).then_some(is_key_down)
+    }
+
+    fn handle_recording_capture_windows(ctx: &HookContext, vk: u16, is_key_down: bool) {
+        if is_key_down {
+            if vk as u32 == VK_ESCAPE {
+                if let Ok(mut shared) = ctx.shared.try_lock() {
+                    shared.recording.reset();
+                }
+                (ctx.recording_rejected_handler)(RecordingRejectedPayload {
+                    reason: "esc_reserved".to_string(),
+                });
+                return;
+            }
+            if is_modifier_vk(vk as u32) {
+                if let Ok(mut shared) = ctx.shared.try_lock() {
+                    shared.recording.accumulated_modifiers = unsafe { get_active_modifiers_windows() };
+                    shared.recording.last_modifier_keycode = Some(vk);
+                }
+            } else {
+                let mods = if let Ok(mut shared) = ctx.shared.try_lock() {
+                    let mods = shared.recording.accumulated_modifiers.iter().cloned().collect();
+                    shared.recording.reset();
+                    mods
+                } else {
+                    vec![]
+                };
+                (ctx.recording_captured_handler)(RecordingCapturedPayload {
+                    keycode: vk,
+                    modifiers: mods,
+                });
+            }
+        } else if is_modifier_vk(vk as u32) {
+            let all_released = unsafe { get_active_modifiers_windows().is_empty() };
+            if all_released {
+                if let Ok(mut shared) = ctx.shared.try_lock() {
+                    if let Some(last_kc) = shared.recording.last_modifier_keycode.take() {
+                        shared.recording.reset();
+                        drop(shared);
+                        (ctx.recording_captured_handler)(RecordingCapturedPayload {
+                            keycode: last_kc,
+                            modifiers: vec![],
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     pub fn install<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerState) {
-        let shared_for_hook = state.shared.clone();
-        let is_pressed_for_hook = state.is_pressed.clone();
         let app_handle_error = app_handle.clone();
         let app_handle_escape = app_handle.clone();
         let app_handle_rec_captured = app_handle.clone();
         let app_handle_rec_rejected = app_handle.clone();
+        let app_handle_mode = app_handle.clone();
         CONTEXT
             .set(HookContext {
-                shared: shared_for_hook,
-                is_pressed: is_pressed_for_hook,
+                shared: state.shared.clone(),
+                is_pressed: state.is_pressed.clone(),
+                mode_toggle_pressed: state.mode_toggle_pressed.clone(),
                 key_handler: Box::new(move |pressed, mode| {
-                    handle_key_event(&app_handle, pressed, &state, mode);
+                    handle_recording_key_event(&app_handle, pressed, &state, mode);
+                }),
+                mode_toggle_handler: Box::new(move |pressed| {
+                    if pressed {
+                        let _ = app_handle_mode.emit("hotkey:mode-toggle-dedicated", ());
+                    }
                 }),
                 escape_handler: Box::new(move || {
                     let _ = app_handle_escape.emit("escape:pressed", ());
@@ -1067,10 +932,8 @@ mod windows_hook {
 
         std::thread::spawn(move || unsafe {
             use windows::Win32::UI::WindowsAndMessaging::*;
-
             match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
                 Ok(hook) => {
-                    println!("[hotkey-listener] Windows keyboard hook installed");
                     let mut msg = MSG::default();
                     while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                         let _ = TranslateMessage(&msg);
@@ -1079,10 +942,6 @@ mod windows_hook {
                     let _ = UnhookWindowsHookEx(hook);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[hotkey-listener] ERROR: Failed to install keyboard hook: {}",
-                        e
-                    );
                     let _ = app_handle_error.emit(
                         "hotkey:error",
                         serde_json::json!({
@@ -1105,98 +964,66 @@ mod windows_hook {
         if n_code >= 0 {
             if let Some(ctx) = CONTEXT.get() {
                 let kbd = *(l_param.0 as *const KBDLLHOOKSTRUCT);
-                // Ignore Copilot's dedicated VK_F23 signal to avoid interfering with Quick View.
                 if kbd.vkCode == VK_F23 {
                     return CallNextHookEx(None, n_code, w_param, l_param);
                 }
                 let w = w_param.0 as u32;
-
                 let is_key_down = w == WM_KEYDOWN || w == WM_SYSKEYDOWN;
                 let is_key_up = w == WM_KEYUP || w == WM_SYSKEYUP;
-
                 if is_key_down || is_key_up {
-                    // Recording mode: delegate to recording handler, skip all trigger logic
-                    let is_recording = ctx
+                    let is_recording_capture = ctx
                         .shared
                         .try_lock()
                         .map(|s| s.recording.is_active)
                         .unwrap_or(false);
-                    if is_recording {
-                        handle_recording_event_windows(ctx, kbd.vkCode as u16, is_key_down);
+                    if is_recording_capture {
+                        handle_recording_capture_windows(ctx, kbd.vkCode as u16, is_key_down);
                         return CallNextHookEx(None, n_code, w_param, l_param);
                     }
 
-                    // ESC key: clear double-tap state, emit escape
                     if kbd.vkCode == VK_ESCAPE && is_key_down {
-                        if let Ok(mut shared) = ctx.shared.try_lock() {
-                            shared.double_tap.clear();
-                        }
                         (ctx.escape_handler)();
                         return CallNextHookEx(None, n_code, w_param, l_param);
                     }
 
-                    let (trigger, mode, active_mods) = match ctx.shared.try_lock() {
-                        Ok(mut shared) => {
-                            // Update active modifiers
-                            shared.active_modifiers = get_active_modifiers_windows();
-                            let mods = shared.active_modifiers.clone();
-                            (
-                                shared.trigger_key.clone(),
-                                shared.trigger_mode.clone(),
-                                mods,
-                            )
-                        }
-                        Err(_) => return CallNextHookEx(None, n_code, w_param, l_param),
-                    };
-
-                    // Combo trigger
-                    if let TriggerKey::Combo {
-                        ref modifiers,
-                        keycode: combo_kc,
-                    } = trigger
-                    {
-                        if kbd.vkCode == combo_kc as u32 {
-                            // Primary key press/release
-                            if is_key_down {
-                                if matches_combo_trigger(
-                                    combo_kc,
-                                    modifiers,
-                                    combo_kc,
-                                    &active_mods,
-                                ) {
-                                    (ctx.key_handler)(true, &mode);
-                                }
-                            } else if ctx.is_pressed.load(Ordering::SeqCst) {
-                                (ctx.key_handler)(false, &mode);
+                    let (recording_trigger, mode, mode_toggle_key, active_mods) =
+                        match ctx.shared.try_lock() {
+                            Ok(mut shared) => {
+                                shared.active_modifiers = get_active_modifiers_windows();
+                                (
+                                    shared.trigger_key.clone(),
+                                    shared.trigger_mode.clone(),
+                                    shared.mode_toggle_key.clone(),
+                                    shared.active_modifiers.clone(),
+                                )
                             }
-                        } else if is_key_up {
-                            // A modifier key released — only trigger release if combo was active
-                            let combo_was_active = ctx.is_pressed.load(Ordering::SeqCst);
-                            if combo_was_active {
-                                let still_all_held =
-                                    modifiers.iter().all(|m| active_mods.contains(m));
-                                if !still_all_held {
-                                    (ctx.key_handler)(false, &mode);
+                            Err(_) => return CallNextHookEx(None, n_code, w_param, l_param),
+                        };
+
+                    if let Some(pressed) = trigger_matches_windows(
+                        kbd.vkCode,
+                        is_key_down,
+                        &recording_trigger,
+                        &active_mods,
+                        &ctx.is_pressed,
+                    ) {
+                        (ctx.key_handler)(pressed, &mode);
+                    } else if let Some(mode_key) = mode_toggle_key {
+                        if let Some(pressed) = trigger_matches_windows(
+                            kbd.vkCode,
+                            is_key_down,
+                            &mode_key,
+                            &active_mods,
+                            &ctx.mode_toggle_pressed,
+                        ) {
+                            if pressed {
+                                if !ctx.mode_toggle_pressed.swap(true, Ordering::SeqCst) {
+                                    (ctx.mode_toggle_handler)(true);
                                 }
+                            } else {
+                                ctx.mode_toggle_pressed.store(false, Ordering::SeqCst);
                             }
                         }
-
-                        return CallNextHookEx(None, n_code, w_param, l_param);
-                    }
-
-                    // Single-key triggers (existing logic)
-                    let matches = match trigger {
-                        TriggerKey::RightAlt => kbd.vkCode == VK_RMENU,
-                        TriggerKey::LeftAlt => kbd.vkCode == VK_LMENU,
-                        TriggerKey::Control => kbd.vkCode == VK_LCONTROL,
-                        TriggerKey::RightControl => kbd.vkCode == VK_RCONTROL,
-                        TriggerKey::Shift => kbd.vkCode == VK_LSHIFT,
-                        TriggerKey::Custom { keycode } => kbd.vkCode == keycode as u32,
-                        _ => false,
-                    };
-
-                    if matches {
-                        (ctx.key_handler)(is_key_down, &mode);
                     }
                 }
             }
@@ -1211,7 +1038,6 @@ mod windows_hook {
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("hotkey-listener")
         .setup(move |app, _api| {
-            // Platform-specific default trigger key
             #[cfg(target_os = "macos")]
             let default_key = TriggerKey::Fn;
             #[cfg(target_os = "windows")]
@@ -1223,18 +1049,32 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 shared: Arc::new(Mutex::new(HotkeySharedState {
                     trigger_key: default_key,
                     trigger_mode: TriggerMode::Hold,
+                    mode_toggle_key: None,
                     active_modifiers: HashSet::new(),
-                    double_tap: DoubleTapState::new(),
                     recording: RecordingState::new(),
-                    toggle_long_press_fired: false,
                 })),
                 is_pressed: Arc::new(AtomicBool::new(false)),
                 is_toggled_on: Arc::new(AtomicBool::new(false)),
+                mode_toggle_pressed: Arc::new(AtomicBool::new(false)),
                 #[cfg(target_os = "macos")]
                 run_loop_ref: Arc::new(Mutex::new(None)),
             };
 
             let hook_state = state.clone();
+            let configure_state = state.clone();
+            app.listen_global("hotkey:configure-mode-toggle", move |event| {
+                let payload = event.payload();
+                if payload.trim().is_empty() || payload == "null" {
+                    configure_state.update_mode_toggle_config(None);
+                    return;
+                }
+                match serde_json::from_str::<TriggerKey>(payload) {
+                    Ok(key) => configure_state.update_mode_toggle_config(Some(key)),
+                    Err(err) => eprintln!(
+                        "[hotkey-listener] invalid mode-toggle config payload: {err}"
+                    ),
+                }
+            });
 
             app.manage(state);
 
@@ -1242,28 +1082,18 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             {
                 let trusted = check_accessibility_permission();
                 if !trusted {
-                    println!("[hotkey-listener] Prompting for Accessibility permission...");
                     prompt_accessibility_permission();
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    let trusted_after = check_accessibility_permission();
-                    if !trusted_after {
-                        println!("[hotkey-listener] WARNING: Still no Accessibility permission.");
-                    }
                 }
                 start_event_tap(app.clone(), hook_state);
             }
 
             #[cfg(target_os = "windows")]
-            {
-                windows_hook::install(app.clone(), hook_state);
-            }
+            windows_hook::install(app.clone(), hook_state);
 
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let _ = hook_state;
-                println!(
-                    "[hotkey-listener] Hotkey listener is only supported on macOS and Windows."
-                );
             }
 
             Ok(())
@@ -1283,283 +1113,74 @@ mod tests {
             shared: Arc::new(Mutex::new(HotkeySharedState {
                 trigger_key: TriggerKey::Fn,
                 trigger_mode: TriggerMode::Hold,
+                mode_toggle_key: None,
                 active_modifiers: HashSet::new(),
-                double_tap: DoubleTapState::new(),
                 recording: RecordingState::new(),
-                toggle_long_press_fired: false,
             })),
             is_pressed: Arc::new(AtomicBool::new(false)),
             is_toggled_on: Arc::new(AtomicBool::new(false)),
+            mode_toggle_pressed: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "macos")]
             run_loop_ref: Arc::new(Mutex::new(None)),
         }
     }
 
     #[test]
-    fn test_custom_trigger_key_serde_serialize() {
+    fn custom_trigger_key_serde_roundtrip() {
         let key = TriggerKey::Custom { keycode: 96 };
-        let value = serde_json::to_value(&key).unwrap();
-        assert_eq!(value, json!({"custom": {"keycode": 96}}));
+        assert_eq!(serde_json::to_value(&key).unwrap(), json!({"custom": {"keycode": 96}}));
+        let decoded: TriggerKey = serde_json::from_value(json!({"custom": {"keycode": 96}})).unwrap();
+        assert_eq!(decoded, key);
     }
 
     #[test]
-    fn test_custom_trigger_key_serde_deserialize() {
-        let json_val = json!({"custom": {"keycode": 96}});
-        let key: TriggerKey = serde_json::from_value(json_val).unwrap();
-        assert_eq!(key, TriggerKey::Custom { keycode: 96 });
+    fn preset_trigger_key_serde_roundtrip() {
+        let key: TriggerKey = serde_json::from_value(json!("fn")).unwrap();
+        assert_eq!(key, TriggerKey::Fn);
+        assert_eq!(serde_json::to_value(&key).unwrap(), json!("fn"));
     }
 
     #[test]
-    fn test_preset_trigger_key_serde_roundtrip() {
-        let key = TriggerKey::Fn;
-        let serialized = serde_json::to_value(&key).unwrap();
-        assert_eq!(serialized, json!("fn"));
-        let deserialized: TriggerKey = serde_json::from_value(json!("fn")).unwrap();
-        assert_eq!(deserialized, TriggerKey::Fn);
+    fn combo_matching_requires_exact_modifiers() {
+        let mut mods = HashSet::new();
+        mods.insert(ModifierFlag::Command);
+        assert!(matches_combo_trigger(
+            1,
+            &[ModifierFlag::Command],
+            1,
+            &mods
+        ));
+        mods.insert(ModifierFlag::Shift);
+        assert!(!matches_combo_trigger(
+            1,
+            &[ModifierFlag::Command],
+            1,
+            &mods
+        ));
     }
 
     #[test]
-    fn test_preset_trigger_key_backward_compat() {
-        let presets = vec![
-            ("\"fn\"", TriggerKey::Fn),
-            ("\"option\"", TriggerKey::Option),
-            ("\"rightOption\"", TriggerKey::RightOption),
-            ("\"command\"", TriggerKey::Command),
-            ("\"rightAlt\"", TriggerKey::RightAlt),
-            ("\"leftAlt\"", TriggerKey::LeftAlt),
-            ("\"control\"", TriggerKey::Control),
-            ("\"rightControl\"", TriggerKey::RightControl),
-            ("\"shift\"", TriggerKey::Shift),
-        ];
-        for (json_str, expected) in presets {
-            let deserialized: TriggerKey = serde_json::from_str(json_str).unwrap();
-            assert_eq!(deserialized, expected, "Failed for {json_str}");
-        }
+    fn mode_toggle_is_unassigned_by_default() {
+        let state = make_test_state();
+        assert!(state.shared.lock().unwrap().mode_toggle_key.is_none());
     }
 
     #[test]
-    fn test_combo_trigger_key_serde_serialize() {
-        let key = TriggerKey::Combo {
-            modifiers: vec![ModifierFlag::Command],
-            keycode: 38,
-        };
-        let value = serde_json::to_value(&key).unwrap();
-        assert_eq!(
-            value,
-            json!({"combo": {"modifiers": ["command"], "keycode": 38}})
-        );
+    fn mode_toggle_config_is_independent_from_recording_hotkey() {
+        let state = make_test_state();
+        state.update_mode_toggle_config(Some(TriggerKey::Custom { keycode: 42 }));
+        let shared = state.shared.lock().unwrap();
+        assert_eq!(shared.trigger_key, TriggerKey::Fn);
+        assert_eq!(shared.mode_toggle_key, Some(TriggerKey::Custom { keycode: 42 }));
     }
 
     #[test]
-    fn test_combo_trigger_key_serde_deserialize() {
-        let json_val = json!({"combo": {"modifiers": ["command", "shift"], "keycode": 38}});
-        let key: TriggerKey = serde_json::from_value(json_val).unwrap();
-        assert_eq!(
-            key,
-            TriggerKey::Combo {
-                modifiers: vec![ModifierFlag::Command, ModifierFlag::Shift],
-                keycode: 38,
-            }
-        );
-    }
-
-    #[test]
-    fn test_combo_trigger_key_serde_roundtrip() {
-        let key = TriggerKey::Combo {
-            modifiers: vec![ModifierFlag::Control, ModifierFlag::Option],
-            keycode: 49,
-        };
-        let serialized = serde_json::to_string(&key).unwrap();
-        let deserialized: TriggerKey = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(key, deserialized);
-    }
-
-    #[test]
-    fn test_modifier_flag_serde() {
-        let flag = ModifierFlag::Command;
-        let value = serde_json::to_value(&flag).unwrap();
-        assert_eq!(value, json!("command"));
-
-        let deserialized: ModifierFlag = serde_json::from_value(json!("shift")).unwrap();
-        assert_eq!(deserialized, ModifierFlag::Shift);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn test_matches_trigger_key_macos_custom() {
-        let key = TriggerKey::Custom { keycode: 96 };
-        assert!(matches_trigger_key_macos(96, &key));
-        assert!(!matches_trigger_key_macos(97, &key));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn test_escape_keycode_macos() {
-        assert_eq!(macos_keycodes::ESCAPE, 53);
-    }
-
-    #[test]
-    fn test_reset_key_states() {
+    fn reset_clears_both_pressed_states() {
         let state = make_test_state();
         state.is_pressed.store(true, Ordering::SeqCst);
-        state.is_toggled_on.store(true, Ordering::SeqCst);
+        state.mode_toggle_pressed.store(true, Ordering::SeqCst);
         state.reset_key_states();
         assert!(!state.is_pressed.load(Ordering::SeqCst));
-        assert!(!state.is_toggled_on.load(Ordering::SeqCst));
-    }
-
-    // ── Combo matching tests ──
-
-    #[test]
-    fn test_matches_combo_trigger_exact_match() {
-        let mut active = HashSet::new();
-        active.insert(ModifierFlag::Command);
-
-        // Exact match: ⌘+J with only ⌘ held
-        assert!(matches_combo_trigger(
-            38,
-            &[ModifierFlag::Command],
-            38,
-            &active
-        ));
-    }
-
-    #[test]
-    fn test_matches_combo_trigger_extra_modifier_rejected() {
-        let mut active = HashSet::new();
-        active.insert(ModifierFlag::Command);
-        active.insert(ModifierFlag::Shift);
-
-        // Extra modifier (⇧) held — should NOT match ⌘+J
-        assert!(!matches_combo_trigger(
-            38,
-            &[ModifierFlag::Command],
-            38,
-            &active
-        ));
-    }
-
-    #[test]
-    fn test_matches_combo_trigger_multi_modifier_match() {
-        let mut active = HashSet::new();
-        active.insert(ModifierFlag::Command);
-        active.insert(ModifierFlag::Shift);
-
-        // Exact match for ⌘+⇧+J
-        assert!(matches_combo_trigger(
-            38,
-            &[ModifierFlag::Command, ModifierFlag::Shift],
-            38,
-            &active
-        ));
-    }
-
-    #[test]
-    fn test_matches_combo_trigger_missing_modifier() {
-        let mut active = HashSet::new();
-        active.insert(ModifierFlag::Shift);
-
-        assert!(!matches_combo_trigger(
-            38,
-            &[ModifierFlag::Command],
-            38,
-            &active
-        ));
-    }
-
-    #[test]
-    fn test_matches_combo_trigger_wrong_keycode() {
-        let mut active = HashSet::new();
-        active.insert(ModifierFlag::Command);
-
-        assert!(!matches_combo_trigger(
-            39,
-            &[ModifierFlag::Command],
-            38,
-            &active
-        ));
-    }
-
-    // ── Double-tap tests ──
-
-    #[test]
-    fn test_check_double_tap_within_gap() {
-        let shared = HotkeySharedState {
-            trigger_key: TriggerKey::Fn,
-            trigger_mode: TriggerMode::Hold,
-            active_modifiers: HashSet::new(),
-            double_tap: DoubleTapState {
-                last_release_time: Some(Instant::now()),
-                last_hold_start: None,
-            },
-            recording: RecordingState::new(),
-            toggle_long_press_fired: false,
-        };
-        assert!(check_double_tap(&shared));
-    }
-
-    #[test]
-    fn test_check_double_tap_toggle_mode_skipped() {
-        let shared = HotkeySharedState {
-            trigger_key: TriggerKey::Fn,
-            trigger_mode: TriggerMode::Toggle,
-            active_modifiers: HashSet::new(),
-            double_tap: DoubleTapState {
-                last_release_time: Some(Instant::now()),
-                last_hold_start: None,
-            },
-            recording: RecordingState::new(),
-            toggle_long_press_fired: false,
-        };
-        assert!(!check_double_tap(&shared));
-    }
-
-    #[test]
-    fn test_check_double_tap_no_previous_release() {
-        let shared = HotkeySharedState {
-            trigger_key: TriggerKey::Fn,
-            trigger_mode: TriggerMode::Hold,
-            active_modifiers: HashSet::new(),
-            double_tap: DoubleTapState::new(),
-            recording: RecordingState::new(),
-            toggle_long_press_fired: false,
-        };
-        assert!(!check_double_tap(&shared));
-    }
-
-    #[test]
-    fn test_record_release_long_hold_clears() {
-        let long_ago = Instant::now() - std::time::Duration::from_millis(500);
-        let mut shared = HotkeySharedState {
-            trigger_key: TriggerKey::Fn,
-            trigger_mode: TriggerMode::Hold,
-            active_modifiers: HashSet::new(),
-            double_tap: DoubleTapState {
-                last_release_time: None,
-                last_hold_start: Some(long_ago),
-            },
-            recording: RecordingState::new(),
-            toggle_long_press_fired: false,
-        };
-        record_release_for_double_tap(&mut shared);
-        assert!(shared.double_tap.last_release_time.is_none());
-    }
-
-    #[test]
-    fn test_record_release_short_hold_records() {
-        let recent = Instant::now() - std::time::Duration::from_millis(100);
-        let mut shared = HotkeySharedState {
-            trigger_key: TriggerKey::Fn,
-            trigger_mode: TriggerMode::Hold,
-            active_modifiers: HashSet::new(),
-            double_tap: DoubleTapState {
-                last_release_time: None,
-                last_hold_start: Some(recent),
-            },
-            recording: RecordingState::new(),
-            toggle_long_press_fired: false,
-        };
-        record_release_for_double_tap(&mut shared);
-        assert!(shared.double_tap.last_release_time.is_some());
+        assert!(!state.mode_toggle_pressed.load(Ordering::SeqCst));
     }
 }
