@@ -40,6 +40,17 @@ export interface HotkeyConfig {
   triggerMode: TriggerMode;
 }
 
+/**
+ * Separate shortcut used only for switching the refinement preset.
+ * `null` means unassigned, which is the SayIt Custom default.
+ *
+ * This is deliberately independent of HotkeyConfig: the recording shortcut
+ * must never gain double-tap / long-press prompt-mode side effects again.
+ */
+export interface ModeToggleHotkeyConfig {
+  triggerKey: TriggerKey | null;
+}
+
 export const PROMPT_MODE_VALUES = ["minimal", "active", "custom"] as const;
 export type PromptMode = (typeof PROMPT_MODE_VALUES)[number];
 export type PresetPromptMode = Exclude<PromptMode, "custom">;
