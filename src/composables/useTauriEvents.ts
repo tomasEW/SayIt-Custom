@@ -25,16 +25,10 @@ export const CORRECTION_MONITOR_RESULT = "correction-monitor:result" as const;
 export const VOCABULARY_LEARNED = "vocabulary:learned" as const;
 export const ESCAPE_PRESSED = "escape:pressed" as const;
 
-/**
- * Prompt-mode switching is intentionally decoupled from the recording hotkey.
- *
- * The legacy Rust listener still emits `hotkey:mode-toggle` for recording-key
- * double-tap / long-press until its low-level listener is removed.  The
- * frontend must not subscribe to that legacy event: recording keys are only
- * allowed to start/stop recording.  A dedicated mode-toggle hotkey will emit
- * this separate event once configured.
- */
+/** Recording hotkeys never emit this event. Only the separately configured mode key does. */
 export const HOTKEY_MODE_TOGGLE = "hotkey:mode-toggle-dedicated" as const;
+/** Settings -> Rust listener configuration channel. Payload is TriggerKey or null. */
+export const HOTKEY_MODE_TOGGLE_CONFIG = "hotkey:configure-mode-toggle" as const;
 export const HOTKEY_RECORDING_CAPTURED = "hotkey:recording-captured" as const;
 export const HOTKEY_RECORDING_REJECTED = "hotkey:recording-rejected" as const;
 
