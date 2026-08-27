@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{
     plugin::{Builder, TauriPlugin},
-    AppHandle, Emitter, Manager, Runtime,
+    AppHandle, Emitter, Listener, Manager, Runtime,
 };
 
 // ========== Public Types ==========
@@ -23,21 +23,16 @@ pub enum ModifierFlag {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum TriggerKey {
-    // macOS keys (keycode)
     Fn,
     Option,
     RightOption,
     Command,
-    // Windows keys (VK code)
     RightAlt,
     LeftAlt,
-    // Cross-platform
     Control,
     RightControl,
     Shift,
-    // User-defined key (platform-specific keycode)
     Custom { keycode: u16 },
-    // Modifier(s) + primary key
     Combo {
         modifiers: Vec<ModifierFlag>,
         keycode: u16,
@@ -64,8 +59,6 @@ struct HotkeyEventPayload {
     mode: TriggerMode,
     action: HotkeyAction,
 }
-
-// ========== Shared State ==========
 
 struct RecordingState {
     is_active: bool,
@@ -171,8 +164,6 @@ impl HotkeyListenerState {
     pub fn shutdown(&self) {}
 }
 
-// ========== Matching ==========
-
 fn matches_combo_trigger(
     keycode: u16,
     combo_modifiers: &[ModifierFlag],
@@ -224,8 +215,7 @@ fn handle_recording_key_event<R: Runtime>(
         }
         TriggerMode::Toggle => {
             if pressed && !state.is_pressed.swap(true, Ordering::SeqCst) {
-                // Toggle mode reacts on key release so holding the recording key has
-                // no hidden secondary action.
+                // Intentionally no long-press side effect.
             } else if !pressed && state.is_pressed.swap(false, Ordering::SeqCst) {
                 let was_on = state.is_toggled_on.fetch_xor(true, Ordering::SeqCst);
                 let action = if was_on {
@@ -259,8 +249,6 @@ fn handle_mode_toggle_key_event<R: Runtime>(
         state.mode_toggle_pressed.store(false, Ordering::SeqCst);
     }
 }
-
-// ========== macOS ==========
 
 #[cfg(target_os = "macos")]
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -632,8 +620,6 @@ fn start_event_tap<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerSt
                     )
                 };
 
-                // Recording hotkey always takes precedence when the two are configured
-                // identically. This prevents a recording key from ever switching modes.
                 let recording_matched = process_trigger_macos(
                     &app_handle,
                     event_type,
@@ -704,8 +690,6 @@ fn stop_existing_event_tap(run_loop_ref: &Arc<Mutex<Option<core_foundation::runl
     }
 }
 
-// ========== Commands used by existing app invoke handler ==========
-
 #[tauri::command]
 pub fn reset_hotkey_state(state: tauri::State<'_, HotkeyListenerState>) {
     state.reset_key_states();
@@ -749,8 +733,6 @@ pub fn reinitialize_hotkey_listener<R: Runtime>(app: AppHandle<R>) -> Result<(),
         Ok(())
     }
 }
-
-// ========== Windows ==========
 
 #[cfg(target_os = "windows")]
 mod windows_hook {
@@ -830,11 +812,7 @@ mod windows_hook {
         active_mods: &HashSet<ModifierFlag>,
         pressed_state: &AtomicBool,
     ) -> Option<bool> {
-        if let TriggerKey::Combo {
-            modifiers,
-            keycode,
-        } = key
-        {
+        if let TriggerKey::Combo { modifiers, keycode } = key {
             if vk == *keycode as u32 {
                 if is_key_down {
                     if matches_combo_trigger(*keycode, modifiers, *keycode, active_mods) {
@@ -1033,11 +1011,11 @@ mod windows_hook {
     }
 }
 
-// ========== Plugin Init ==========
-
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("hotkey-listener")
         .setup(move |app, _api| {
+            use tauri_plugin_store::StoreExt;
+
             #[cfg(target_os = "macos")]
             let default_key = TriggerKey::Fn;
             #[cfg(target_os = "windows")]
@@ -1045,11 +1023,19 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let default_key = TriggerKey::Control;
 
+            // Keep the dedicated mode hotkey unassigned on first launch, but restore
+            // a previously saved binding before the low-level listener starts.
+            let saved_mode_toggle_key = app
+                .store("settings.json")
+                .ok()
+                .and_then(|store| store.get("modeToggleHotkeyTriggerKey"))
+                .and_then(|value| serde_json::from_value::<TriggerKey>(value.clone()).ok());
+
             let state = HotkeyListenerState {
                 shared: Arc::new(Mutex::new(HotkeySharedState {
                     trigger_key: default_key,
                     trigger_mode: TriggerMode::Hold,
-                    mode_toggle_key: None,
+                    mode_toggle_key: saved_mode_toggle_key,
                     active_modifiers: HashSet::new(),
                     recording: RecordingState::new(),
                 })),
@@ -1101,8 +1087,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .build()
 }
 
-// ========== Tests ==========
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1144,19 +1128,9 @@ mod tests {
     fn combo_matching_requires_exact_modifiers() {
         let mut mods = HashSet::new();
         mods.insert(ModifierFlag::Command);
-        assert!(matches_combo_trigger(
-            1,
-            &[ModifierFlag::Command],
-            1,
-            &mods
-        ));
+        assert!(matches_combo_trigger(1, &[ModifierFlag::Command], 1, &mods));
         mods.insert(ModifierFlag::Shift);
-        assert!(!matches_combo_trigger(
-            1,
-            &[ModifierFlag::Command],
-            1,
-            &mods
-        ));
+        assert!(!matches_combo_trigger(1, &[ModifierFlag::Command], 1, &mods));
     }
 
     #[test]
