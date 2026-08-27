@@ -25,8 +25,13 @@ export const CORRECTION_MONITOR_RESULT = "correction-monitor:result" as const;
 export const VOCABULARY_LEARNED = "vocabulary:learned" as const;
 export const ESCAPE_PRESSED = "escape:pressed" as const;
 
-/** Recording hotkeys never emit this event. Only the separately configured mode key does. */
-export const HOTKEY_MODE_TOGGLE = "hotkey:mode-toggle-dedicated" as const;
+/**
+ * Legacy event retained only so old useVoiceFlowStore code has nothing live to
+ * subscribe to. The recording listener no longer emits prompt-mode events.
+ */
+export const HOTKEY_MODE_TOGGLE = "hotkey:mode-toggle-legacy-disabled" as const;
+/** Real event emitted exclusively by the separately configured mode shortcut. */
+export const HOTKEY_MODE_TOGGLE_DEDICATED = "hotkey:mode-toggle-dedicated" as const;
 /** Settings -> Rust listener configuration channel. Payload is TriggerKey or null. */
 export const HOTKEY_MODE_TOGGLE_CONFIG = "hotkey:configure-mode-toggle" as const;
 export const HOTKEY_RECORDING_CAPTURED = "hotkey:recording-captured" as const;
@@ -64,12 +69,10 @@ export async function waitForDatabaseReady(timeoutMs = 8000): Promise<boolean> {
 
     void listen(DATABASE_READY, () => finish(true)).then((fn) => {
       unlisten = fn;
-      // 監聽建立前就逾時：立即解除剛建立的監聽
       if (settled) {
         fn();
         return;
       }
-      // 監聽就緒後請 Dashboard 重新廣播，補捉早於監聽的 ready 事件
       void emit(DATABASE_READY_PING);
     });
 
