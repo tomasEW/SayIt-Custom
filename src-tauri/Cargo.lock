@@ -4639,7 +4639,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sayit"
+name = "sayit-custom"
 version = "0.11.0"
 dependencies = [
  "arboard",

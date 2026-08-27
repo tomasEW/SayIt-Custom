@@ -599,7 +599,7 @@ fn start_event_tap<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerSt
                     return None;
                 }
 
-                if event_type == CGEventType::KeyDown && keycode == macos_keycodes::ESCAPE {
+                if matches!(event_type, CGEventType::KeyDown) && keycode == macos_keycodes::ESCAPE {
                     let _ = app_handle.emit("escape:pressed", ());
                     return None;
                 }
@@ -609,7 +609,7 @@ fn start_event_tap<R: Runtime>(app_handle: AppHandle<R>, state: HotkeyListenerSt
                         Ok(g) => g,
                         Err(_) => return None,
                     };
-                    if event_type == CGEventType::FlagsChanged {
+                    if matches!(event_type, CGEventType::FlagsChanged) {
                         shared.active_modifiers = extract_active_modifiers_macos(flags);
                     }
                     (
@@ -1048,7 +1048,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 
             let hook_state = state.clone();
             let configure_state = state.clone();
-            app.listen_global("hotkey:configure-mode-toggle", move |event| {
+            app.listen("hotkey:configure-mode-toggle", move |event| {
                 let payload = event.payload();
                 if payload.trim().is_empty() || payload == "null" {
                     configure_state.update_mode_toggle_config(None);
