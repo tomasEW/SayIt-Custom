@@ -14,6 +14,7 @@ import {
 import { extractErrorMessage } from "./lib/errorUtils";
 import { initSentryForDashboard, captureError } from "./lib/sentry";
 import { useSettingsStore } from "./stores/useSettingsStore";
+import { useModeHotkeyStore } from "./stores/useModeHotkeyStore";
 import i18n from "./i18n";
 import "./style.css";
 
@@ -61,6 +62,10 @@ async function bootstrap() {
 
   const settingsStore = useSettingsStore();
   await settingsStore.loadSettings();
+  // Dedicated prompt-mode hotkey is a separate setting; default is unassigned.
+  // Loading it also syncs any saved binding to the Rust global listener.
+  const modeHotkeyStore = useModeHotkeyStore();
+  await modeHotkeyStore.loadSettings();
   await settingsStore.consumeUpgradeNotice();
   await settingsStore.initializeAutoStart();
 
